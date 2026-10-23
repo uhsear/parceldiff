@@ -20,7 +20,7 @@ threshold that tells a re-survey from a different parcel under the same key.
 That is the gap this tool fills.
 
     python parceldiff.py --self-test
-    python parceldiff.py old.csv new.csv --key-field PARCEL
+    python parceldiff.py old.csv new.csv --key-field PARCEL --skip-reuse-check
     python parceldiff.py old.csv new.csv --key-field PARCEL --x-field X --y-field Y
     python parceldiff.py old.csv new.csv --area-field ACRES --area-ratio 3
     python parceldiff.py old.csv new.csv --key-field BOOK,PAGE --compare-fields OWNER,USE
@@ -28,11 +28,12 @@ That is the gap this tool fills.
 
 Nothing is written without --apply.
 
-Exit codes: 0 a diff was produced and no key was reissued, 1 at least one key
-now names a different parcel, 2 a file could not be read or written, 3 the key
-was refused (not unique, or blank on some row), 4 nothing was compared (no key
-on both sides, too few keys on both sides, or a reuse check that measured no
-pair), 64 usage error, 70 an unexpected crash, which is never a finding.
+Exit codes: 0 a diff was produced, the reuse check ran on enough pairs, and no
+key was reissued, 1 at least one key now names a different parcel, 2 a file
+could not be read or written, 3 the key was refused (not unique, or blank on
+some row), 4 the run could not be trusted (no key on both sides, too few keys
+on both sides, a reuse check that measured too few pairs, or no reuse check at
+all), 64 usage error, 70 an unexpected crash, which is never a finding.
 """
 
 from __future__ import print_function
@@ -40,6 +41,7 @@ from __future__ import print_function
 import argparse
 import contextlib
 import csv
+import decimal
 import importlib.util
 import io
 import math
@@ -75,6 +77,13 @@ DEFAULT_MOVE_TOLERANCE = 1.0
 # vintages of one layer share nearly every key. Below this the key is probably
 # spelled differently on the two sides, and the diff has compared nothing real.
 DEFAULT_MIN_OVERLAP = 0.5
+
+# Share of the shared keys that each requested reuse test must have measured.
+# A pair with a blank or unreadable coordinate or area was not tested, and a
+# reissued key among such pairs is invisible. Below this share the run cannot
+# say the keys are sound, so it exits 4. A test that measured no pair always
+# fails the run, whatever this is set to.
+DEFAULT_MIN_MEASURED = 0.9
 
 DEFAULT_KEY_FIELD = "PARCEL"
 DEFAULT_UNITS = "ft"
@@ -130,10 +139,15 @@ class Report(object):
         self.dupes = []          # (side, key label, [lines]) when refused
         self.blanks = []         # (side, line) of rows with no key
         self.pairs = 0
-        self.measured = 0
+        self.measured = 0        # pairs that every requested test measured
+        self.measured_xy = 0     # pairs whose centroid shift could be computed
+        self.measured_area = 0   # pairs whose area ratio could be computed
+        self.unmeasured = []     # (key label, names of the tests that missed)
         self.old_keys = 0
         self.new_keys = 0
         self.min_overlap = DEFAULT_MIN_OVERLAP
+        self.min_measured = DEFAULT_MIN_MEASURED
+        self.skip_reuse = False
         self.reuse_distance = DEFAULT_REUSE_DISTANCE
         self.area_ratio = DEFAULT_AREA_RATIO
         self.check_xy = False
@@ -181,16 +195,26 @@ def key_label(key):
     return "|".join(key)
 
 
+def _exact_number(text):
+    """A finite Decimal, or None. Decimal keeps every digit; a float keeps 15."""
+    try:
+        value = decimal.Decimal(str(text))
+    except (TypeError, ValueError, ArithmeticError):
+        return None
+    return value if value.is_finite() else None
+
+
 def same_value(a, b):
     """True when two cells hold the same value after trimming.
 
-    Numbers compare as numbers, so 1 and 1.0 agree: Excel rewrites a column
-    on the way through, and that must not read as an edit. Text compares
-    exactly. Keys never come through here.
+    Numbers compare as exact decimals, so 1 and 1.0 agree: Excel rewrites a
+    column on the way through, and that must not read as an edit. A float
+    would call two 19-digit ids that differ in the last digit equal, so it is
+    not used here. Text compares exactly. Keys never come through here.
     """
     if a == b:
         return True
-    na, nb = to_number(a), to_number(b)
+    na, nb = _exact_number(a), _exact_number(b)
     return na is not None and nb is not None and na == nb
 
 
@@ -225,21 +249,20 @@ def judge_pair(old, new, fields, reuse_distance, area_ratio, move_tolerance,
                units=DEFAULT_UNITS):
     """Decide one key that is on both sides.
 
-    Returns (class, detail, measured). measured is True when a centroid shift
-    or an area ratio could be computed, so the reuse check saw this pair.
+    Returns (class, detail, measured). measured is (xy, area): whether a
+    centroid shift and an area ratio could be computed for this pair, so the
+    caller knows which reuse test saw it.
     """
     reasons = []
-    measured = False
     moved = False
     shift = separation(old, new)
     if shift is not None:
-        measured = True
         if shift > reuse_distance:
             reasons.append("centroid moved %.1f %s" % (shift, units))
         moved = shift > move_tolerance
     ratio = area_ratio_of(old.area, new.area)
+    measured = (shift is not None, ratio is not None)
     if ratio is not None:
-        measured = True
         if ratio > area_ratio:
             reasons.append("area changed by a factor of %.2f" % ratio)
     if reasons:
@@ -261,7 +284,8 @@ def compare(old, new, fields=(), reuse_distance=DEFAULT_REUSE_DISTANCE,
             area_ratio=DEFAULT_AREA_RATIO,
             move_tolerance=DEFAULT_MOVE_TOLERANCE,
             min_overlap=DEFAULT_MIN_OVERLAP, check_xy=False, check_area=False,
-            allow_blank=False, units=DEFAULT_UNITS):
+            allow_blank=False, units=DEFAULT_UNITS,
+            min_measured=DEFAULT_MIN_MEASURED, skip_reuse=False):
     """Diff two vintages. The key is audited before anything is compared.
 
     A key on two rows, or a row with no key, stops the run and leaves
@@ -277,9 +301,13 @@ def compare(old, new, fields=(), reuse_distance=DEFAULT_REUSE_DISTANCE,
         raise ValueError("the area ratio must be a number of 1 or more")
     if not (_finite(min_overlap) and 0.0 <= min_overlap <= 1.0):
         raise ValueError("the minimum overlap must be between 0 and 1")
+    if not (_finite(min_measured) and 0.0 <= min_measured <= 1.0):
+        raise ValueError("the minimum measured share must be between 0 and 1")
 
     report = Report()
     report.min_overlap = min_overlap
+    report.min_measured = min_measured
+    report.skip_reuse = skip_reuse
     report.reuse_distance = reuse_distance
     report.area_ratio = area_ratio
     report.check_xy = check_xy
@@ -309,11 +337,19 @@ def compare(old, new, fields=(), reuse_distance=DEFAULT_REUSE_DISTANCE,
                 row if name == "new" else None, "no key on this row"))
 
     for key in sorted(set(old_by) & set(new_by)):
-        cls, detail, measured = judge_pair(
+        cls, detail, (xy_ok, area_ok) = judge_pair(
             old_by[key][0], new_by[key][0], fields, reuse_distance,
             area_ratio, move_tolerance, units)
         report.pairs += 1
-        report.measured += 1 if measured else 0
+        report.measured_xy += 1 if xy_ok else 0
+        report.measured_area += 1 if area_ok else 0
+        missed = [name for name, asked, ok in (("centroid", check_xy, xy_ok),
+                                               ("area", check_area, area_ok))
+                  if asked and not ok]
+        if missed:
+            report.unmeasured.append((key_label(key), " and ".join(missed)))
+        elif check_xy or check_area:
+            report.measured += 1
         report.entries.append(Entry(cls, key_label(key), old_by[key][0],
                                     new_by[key][0], detail))
     for key in sorted(set(new_by) - set(old_by)):
@@ -338,9 +374,25 @@ def unverified_reasons(report):
                        "differently on the two sides"
                        % (100.0 * report.overlap(),
                           100.0 * report.min_overlap))
-    if report.pairs and report.checked and report.measured == 0:
-        reasons.append("the key-reuse check measured no pair, because every "
-                       "coordinate or area was blank or unreadable")
+    if not report.checked and not report.skip_reuse:
+        reasons.append("key reuse was not checked, because no coordinate or "
+                       "area column was named. Name --x-field and --y-field, "
+                       "or --area-field, or pass --skip-reuse-check to accept "
+                       "a plain diff")
+    for name, asked, got, noun in (
+            ("centroid", report.check_xy, report.measured_xy, "coordinate"),
+            ("area", report.check_area, report.measured_area, "area")):
+        if not (asked and report.pairs):
+            continue
+        if got == 0:
+            reasons.append("the %s test measured no pair, because every %s "
+                           "was blank, zero or unreadable" % (name, noun))
+        elif got / float(report.pairs) < report.min_measured:
+            reasons.append("the %s test measured only %d of %d pair(s), under "
+                           "the %.0f percent floor, so a reissued key among "
+                           "the rest would go unseen"
+                           % (name, got, report.pairs,
+                              100.0 * report.min_measured))
     return reasons
 
 
@@ -356,8 +408,15 @@ def verdict(report):
     if reasons:
         return 4, "VERDICT: UNVERIFIED, " + "; and ".join(reasons) + "."
     counts = report.counts()
-    text = ("VERDICT: clean. %d changed, %d added, %d removed."
+    text = ("VERDICT: clean. %d changed, %d added, %d removed"
             % (counts[CHANGED], counts[ADDED], counts[REMOVED]))
+    if counts[UNKEYED]:
+        text += (", %d row(s) left out because they have no key"
+                 % counts[UNKEYED])
+    text += "."
+    if report.unmeasured:
+        text += (" %d pair(s) could not be measured for key reuse."
+                 % len(report.unmeasured))
     if not report.checked:
         text += " Key reuse was not checked."
     return 0, text
@@ -438,12 +497,15 @@ def describe(report, sample=DEFAULT_SAMPLE):
                    % (report.measured, report.pairs, " or ".join(tests)))
     else:
         out.append("key reuse: NOT CHECKED, no coordinate or area column was "
-                   "named")
+                   "named%s" % (" (--skip-reuse-check)" if report.skip_reuse
+                                else ""))
     out.extend(report.notes)
 
     _section(out, "keys that now name a different parcel:",
              ["%s  %s (%s)" % (e.key, e.detail, _where(e))
               for e in report.of(REUSED)], sample)
+    _section(out, "pairs the key-reuse check could not measure:",
+             ["%s (%s test)" % pair for pair in report.unmeasured], sample)
     _section(out, "keys whose attributes changed:",
              ["%s  %s (%s)" % (e.key, e.detail, _where(e))
               for e in report.of(CHANGED)], sample)
@@ -548,7 +610,8 @@ def read_csv(path):
         if repeated:
             raise ValueError("%s: column name(s) repeated: %s. A diff cannot "
                              "tell which column is meant."
-                             % (path, ", ".join(repeated)))
+                             % (path, ", ".join(n or "(blank name)"
+                                                for n in repeated)))
         rows = []
         for raw in reader:
             record = _Record(raw)
@@ -660,6 +723,10 @@ def _self_test(tmp):
             row.line = index + 2
         return list(rows)
 
+    def slurp(path):
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+
     def put(name, text):
         path = os.path.join(tmp, name)
         with open(path, "w", newline="", encoding="utf-8") as handle:
@@ -703,6 +770,17 @@ def _self_test(tmp):
           "a blank is not zero, and a separator is not a number")
     check(key_label(("BK", "12")) == "BK|12",
           "a composite key shows with a bar between its parts")
+    check(not same_value("1234567890123456789", "1234567890123456788"),
+          "two 19-digit ids that differ in the last digit are two values"
+          "  <-- pinned defect")
+    check(same_value("01234", "1234") and same_value("1e3", "1000")
+          and same_value("1_000", "1000"),
+          "leading zeros, an exponent and an underscore read as the same "
+          "number")
+    check(not same_value("nan", "NaN") and not same_value("inf", "Infinity")
+          and not same_value("1e99999999999999999999", "1"),
+          "nan, inf and an exponent too large to hold are never equal "
+          "numbers, and none of them raises")
 
     # ---- geometry helpers
     check(separation(mk("a", 0.0, 0.0), mk("a", 3.0, 4.0)) == 5.0,
@@ -720,12 +798,16 @@ def _self_test(tmp):
           "a missing area gives no ratio")
     check(area_ratio_of(0.0, 1.0) is None and area_ratio_of(1.0, -2.0) is None,
           "a zero or negative area gives no ratio, never a divide by zero")
+    check(area_ratio_of(5.0, 0.0) is None and area_ratio_of(0.0, 0.0) is None,
+          "a new area of zero gives no ratio either, never a divide by zero")
+    check(to_number("1_000") == 1000.0,
+          "an underscore is read as a digit separator by float()")
 
     # ---- one pair
     same = mk("k", 0.0, 0.0, 1.0, OWNER="Ames")
     cls, detail, measured = pair(same, mk("k", 0.0, 0.0, 1.0, OWNER="Ames"))
-    check(cls == UNCHANGED and detail == "" and measured,
-          "an identical pair is UNCHANGED and was measured")
+    check(cls == UNCHANGED and detail == "" and measured == (True, True),
+          "an identical pair is UNCHANGED and was measured by both tests")
     cls, detail, _ = pair(same, mk("k", 0.0, 0.0, 1.0, OWNER="Bell"))
     check(cls == CHANGED and detail == "OWNER: 'Ames' -> 'Bell'",
           "an owner edit is CHANGED and names both values")
@@ -765,14 +847,25 @@ def _self_test(tmp):
                           fields=("ACRES",))
     check(cls == CHANGED and detail == "ACRES: '1.00' -> '1.04'",
           "a 4 percent area adjustment is CHANGED, not REUSED")
+    cls, detail, _ = pair(mk("k", area=5.0, OWNER="A"),
+                          mk("k", area=0.0, OWNER="B"))
+    check(cls == CHANGED and pair(mk("k", area=0.0, OWNER="A"),
+                                  mk("k", area=5.0, OWNER="B"))[0] == CHANGED,
+          "a parcel that falls to an area of 0, or rises from it, is "
+          "CHANGED and not REUSED")
+    cls, detail, _ = pair(mk("k", pin="1234567890123456789"),
+                          mk("k", pin="1234567890123456788"), fields=("pin",))
+    check(cls == CHANGED and "pin:" in detail,
+          "a changed 19-digit id is CHANGED, not UNCHANGED"
+          "  <-- pinned defect")
     cls, detail, measured = pair(mk("k", OWNER="A"), mk("k", OWNER="B"))
-    check(cls == CHANGED and not measured,
+    check(cls == CHANGED and measured == (False, False),
           "a pair with no point and no area still diffs, and is not "
           "measured")
     cls, _, measured = pair(mk("k", area=1.0, OWNER="A"),
                             mk("k", area=1.0, OWNER="A"))
-    check(cls == UNCHANGED and measured,
-          "an area alone is enough to measure a pair")
+    check(cls == UNCHANGED and measured == (False, True),
+          "an area alone measures the area test and not the centroid test")
     check(pair(mk("k", 0.0, 0.0, OWNER="A"), mk("k", 0.0, 0.0, OWNER="A"),
                reuse_distance=10.0, move_tolerance=5.0)[0] == UNCHANGED,
           "tighter thresholds still leave an unmoved parcel alone")
@@ -821,6 +914,11 @@ def _self_test(tmp):
     many_lines = describe(compare(many, many), sample=2)
     check(any("and 6 more key(s)" in line for line in many_lines),
           "a long list of repeated keys is cut at the sample and says so")
+    check(not any(line.strip().startswith("... and") for line in
+                  describe(compare(many, many), sample=8)),
+          "a list exactly as long as the sample is not cut")
+    check(not any("rows with no key" in line for line in lines),
+          "a refusal for a repeated key does not claim a row had no key")
 
     trimmed = extract_rows(
         [{"K": " P-1", "V": "x"}, {"K": "P-1 ", "V": "y"}], ["K"], None, None,
@@ -852,14 +950,25 @@ def _self_test(tmp):
     check(any("old line 3 has no key" in line for line in lines)
           and any("--allow-blank-keys" in line for line in lines),
           "the refusal names the line and the flag that overrides it")
+    check(not any("key is not unique" in line for line in lines),
+          "a refusal for a blank key does not claim the key repeats")
+    check(not any(line.strip().startswith("... and") for line in
+                  describe(compare(vintage(*[mk(None) for _ in range(3)]),
+                                   vintage(mk("A"))), sample=3)),
+          "a list of blank rows exactly as long as the sample is not cut")
     many_blank = vintage(*[mk(None) for _ in range(3)])
     check(any("and 1 more row(s)" in line for line in
               describe(compare(many_blank, vintage(mk("A"))), sample=2)),
           "a long list of blank rows is cut at the sample and says so")
-    report = compare(blank_old, vintage(mk("A")), allow_blank=True)
+    report = compare(blank_old, vintage(mk("A")), allow_blank=True,
+                     skip_reuse=True)
     check(not report.refused and report.counts()[UNKEYED] == 1
           and report.counts()[UNCHANGED] == 1 and gate(report) == 0,
           "with --allow-blank-keys the blank row is counted, not dropped")
+    check("1 row(s) left out because they have no key"
+          in describe(report)[-1],
+          "and the verdict counts the rows it left out, so a clean exit "
+          "does not hide them  <-- pinned defect")
     check(any("rows left out because they have no key" in line
               for line in describe(report)),
           "and it is listed, so leaving it out is not silent")
@@ -874,7 +983,7 @@ def _self_test(tmp):
                   mk("D", OWNER="1"))
     new = vintage(mk("A", OWNER="1"), mk("B", OWNER="2"), mk("E", OWNER="1"),
                   mk("D", OWNER="1"), mk("F", OWNER="1"))
-    report = compare(old, new, ("OWNER",))
+    report = compare(old, new, ("OWNER",), skip_reuse=True)
     counts = report.counts()
     check(counts == {UNCHANGED: 2, CHANGED: 1, REUSED: 0, ADDED: 2,
                      REMOVED: 1, UNKEYED: 0},
@@ -894,6 +1003,13 @@ def _self_test(tmp):
           "and the summary says so too")
     check(report.overlap() == 0.75 and report.pairs == 3,
           "three of the four keys of the smaller vintage are on both sides")
+    two_added = compare(vintage(mk("A")), vintage(mk("A"), mk("B"), mk("C")),
+                        skip_reuse=True)
+    check(not any(line.strip().startswith("... and") for line in
+                  describe(two_added, sample=2)),
+          "a section exactly as long as the sample is not cut")
+    check("... and 1 more" in "\n".join(describe(two_added, sample=1)),
+          "and one longer than the sample is")
 
     # ---- a reissued key
     old = vintage(mk("A", 0.0, 0.0, 1.0, OWNER="X"),
@@ -912,6 +1028,12 @@ def _self_test(tmp):
     check(any("key reuse: checked on 2 of 2 pair(s), by centroid moved above "
               "500.0 ft or area ratio above 2.00" in line for line in lines),
           "the summary says which tests ran and on how many pairs")
+    lines_800 = describe(compare(old, new, ("OWNER",), check_xy=True,
+                                 check_area=True, reuse_distance=800.0,
+                                 area_ratio=3.0, units="m"))
+    check(any("by centroid moved above 800.0 m or area ratio above 3.00"
+              in line for line in lines_800),
+          "the summary prints the thresholds and the unit that were used")
     xy_only = describe(compare(old, new, ("OWNER",), check_xy=True))
     check(any("by centroid moved above 500.0 ft" in line and
               "area ratio" not in line for line in xy_only),
@@ -942,7 +1064,7 @@ def _self_test(tmp):
           "an empty new vintage compared nothing")
     old = vintage(mk("1"), mk("2"), mk("3"), mk("4"))
     new = vintage(mk("1"), mk("2"), mk("7"), mk("8"))
-    check(gate(compare(old, new)) == 0,
+    check(gate(compare(old, new, skip_reuse=True)) == 0,
           "exactly the overlap floor passes, the floor is inclusive")
     report = compare(old, vintage(mk("1"), mk("7"), mk("8"), mk("9")))
     check(gate(report) == 4 and "25 percent of the keys are on both sides"
@@ -950,8 +1072,28 @@ def _self_test(tmp):
           "a quarter of the keys on both sides is under the floor and "
           "exits 4  <-- pinned defect")
     check(gate(compare(old, vintage(mk("1"), mk("7"), mk("8"), mk("9")),
-                       min_overlap=0.0)) == 0,
+                       min_overlap=0.0, skip_reuse=True)) == 0,
           "a floor of 0 turns the overlap check off")
+
+    # ---- a run with no reuse check at all
+    plain_old = vintage(mk("a", OWNER="1"), mk("b", OWNER="1"))
+    plain_new = vintage(mk("a", OWNER="1"), mk("b", OWNER="2"))
+    report = compare(plain_old, plain_new)
+    check(gate(report) == 4 and "key reuse was not checked" in
+          describe(report)[-1],
+          "a diff with no coordinate and no area column exits 4, not a "
+          "clean 0  <-- pinned defect")
+    report = compare(plain_old, plain_new, skip_reuse=True)
+    check(gate(report) == 0 and describe(report)[-1].endswith(
+        "Key reuse was not checked."),
+          "--skip-reuse-check accepts a plain diff and says so")
+    flat = vintage(mk("a", 0.0, 0.0, 1.0), mk("b", 5.0, 5.0, 1.0))
+    report = compare(flat, flat, check_xy=True, check_area=True)
+    check(gate(report) == 0 and describe(report)[-1] ==
+          "VERDICT: clean. 0 changed, 0 added, 0 removed."
+          and not any("NOT CHECKED" in line for line in describe(report)),
+          "a checked run that found nothing is plainly clean and does not "
+          "claim the check was skipped")
 
     # ---- a reuse check that measured nothing
     old = vintage(mk("a", None, None, None), mk("b"))
@@ -961,13 +1103,17 @@ def _self_test(tmp):
           and "measured no pair" in describe(report)[-1],
           "coordinates asked for and none readable exits 4, not a clean 0"
           "  <-- pinned defect")
-    check(gate(compare(old, new, check_xy=False)) == 0,
-          "the same rows with no reuse check asked for are not UNVERIFIED")
+    check(gate(compare(old, new, skip_reuse=True)) == 0,
+          "the same rows with --skip-reuse-check are not UNVERIFIED")
     both_reasons = compare(
         vintage(mk("a"), mk("b"), mk("c"), mk("d")),
         vintage(mk("a"), mk("x"), mk("y"), mk("z")), check_xy=True)
     check(describe(both_reasons)[-1].count("; and ") == 1,
           "two reasons are both given")
+    check(len(unverified_reasons(compare(
+        vintage(mk("a")), vintage(mk("b")), check_xy=True, check_area=True))
+        ) == 1,
+          "a run that paired nothing names that reason and no other")
     reused_and_thin = compare(
         vintage(mk("a", 0.0, 0.0), mk("b"), mk("c"), mk("d")),
         vintage(mk("a", 9999.0, 0.0), mk("x"), mk("y"), mk("z")),
@@ -976,7 +1122,81 @@ def _self_test(tmp):
           "a reissued key outranks an unverified run, because it is a "
           "finding")
 
+    # ---- a reuse check that measured only some pairs
+    def spread(total, readable, area=None):
+        """total keys; only the first readable have a point, all have area."""
+        rows = [mk("K%d" % n, 1000.0 * n if n < readable else None,
+                   0.0 if n < readable else None, area)
+                for n in range(total)]
+        return vintage(*rows)
+
+    report = compare(spread(2, 2, 1.0), spread(2, 1, 1.0),
+                     check_xy=True, check_area=True)
+    check(gate(report) == 4 and report.measured_area == 2
+          and "the centroid test measured no pair" not in describe(report)[-1]
+          and "measured only 1 of 2 pair(s)" in describe(report)[-1],
+          "a readable area does not stand in for an unreadable coordinate"
+          "  <-- pinned defect")
+    report = compare(spread(2, 0, 1.0), spread(2, 0, 1.0), check_xy=True,
+                     check_area=True)
+    check(gate(report) == 4 and report.measured_area == 2
+          and "the centroid test measured no pair" in describe(report)[-1],
+          "coordinates unreadable on every row exit 4 even when the area "
+          "reads  <-- pinned defect")
+    report = compare(spread(50, 1), spread(50, 1), check_xy=True)
+    check(gate(report) == 4 and report.measured_xy == 1
+          and "measured only 1 of 50 pair(s), under the 90 percent floor"
+          in describe(report)[-1],
+          "one readable pair in fifty exits 4, not a clean 0"
+          "  <-- pinned defect")
+    report = compare(spread(10, 7), spread(10, 7), check_xy=True)
+    check(gate(report) == 4,
+          "seven readable pairs in ten is under the floor and exits 4"
+          "  <-- pinned defect")
+    report = compare(spread(10, 9), spread(10, 9), check_xy=True)
+    lines = describe(report)
+    check(gate(report) == 0 and report.measured == 9
+          and report.unmeasured == [("K9", "centroid")]
+          and "pairs the key-reuse check could not measure:" in lines
+          and "1 pair(s) could not be measured for key reuse." in lines[-1]
+          and "K9 (centroid test)" in "\n".join(lines)
+          and "checked on 9 of 10 pair(s)" in "\n".join(lines),
+          "nine pairs in ten is exactly the floor: the run passes, and "
+          "the verdict and the report name the pair it could not measure")
+    check(gate(compare(spread(10, 9), spread(10, 9), check_xy=True,
+                       min_measured=1.0)) == 4,
+          "a floor of 1 refuses a run that left one pair unmeasured")
+    check(gate(compare(spread(50, 1), spread(50, 1), check_xy=True,
+                       min_measured=0.0)) == 0,
+          "a floor of 0 accepts any run that measured one pair")
+    check(gate(compare(spread(50, 0), spread(50, 0), check_xy=True,
+                       min_measured=0.0)) == 4,
+          "but a test that measured no pair fails whatever the floor is")
+    both = compare(vintage(mk("k")), vintage(mk("k")), check_xy=True,
+                   check_area=True)
+    check(both.unmeasured == [("k", "centroid and area")],
+          "a pair that neither test could measure names both tests")
+    check(compare(plain_old, plain_new, skip_reuse=True).measured == 0,
+          "a run with no reuse test counts no pair as measured")
+    report = compare(spread(10, 10), spread(10, 10), check_xy=True)
+    check(report.unmeasured == [] and "could not be measured" not in
+          describe(report)[-1]
+          and "could not measure" not in "\n".join(describe(report)),
+          "a run that measured every pair prints no unmeasured section")
+
     # ---- thresholds
+    raises(lambda: compare([], [], min_measured=1.5),
+           "a measured floor over 1 is refused")
+    raises(lambda: compare([], [], min_measured=float("nan")),
+           "a nan measured floor is refused")
+    check(len(compare([], [], min_measured=0.0).entries) == 0
+          and len(compare([], [], min_measured=1.0).entries) == 0,
+          "a measured floor of 0 and of 1 are both legal")
+    check(len(compare([], [], move_tolerance=0.0, reuse_distance=0.0)
+              .entries) == 0,
+          "a move tolerance of 0 is legal")
+    check(len(compare([], [], area_ratio=1.0).entries) == 0,
+          "an area ratio of 1 is legal")
     raises(lambda: compare([], [], move_tolerance=-1.0),
            "a negative move tolerance is refused")
     raises(lambda: compare([], [], move_tolerance=float("nan")),
@@ -1036,6 +1256,12 @@ def _self_test(tmp):
           "one coordinate outside the box is enough to say projected")
     check(not looks_like_degrees(vintage(mk("a"))),
           "no coordinates is not degrees")
+    check(looks_like_degrees(vintage(mk("a", 180.0, 90.0)))
+          and looks_like_degrees(vintage(mk("a", -180.0, -90.0))),
+          "the corners of the longitude and latitude box are degrees")
+    check(not looks_like_degrees(vintage(mk("a", 180.5, 0.0)))
+          and not looks_like_degrees(vintage(mk("a", 0.0, 90.5))),
+          "just outside the box is not degrees")
 
     # ---- reading real files
     path = put("bom.csv", "\ufeffK,V\r\n1,a\r\n\r\n2,\"line\r\nbreak\"\r\n"
@@ -1053,12 +1279,21 @@ def _self_test(tmp):
     check(rows[0].values == {"K": "1", "V": ""}
           and rows[1].values == {"K": "2", "V": "b"},
           "a short row reads as blank and a long row loses its extras")
+    path = put("ragged.csv", "PARCEL,ADDR,X,Y\nA,1 Main St, Apt 2,620100,"
+                             "1580200\n")
+    raw, header = read_csv(path)
+    rows = extract_rows(raw, ["PARCEL"], "X", "Y", None)
+    check(rows[0].x is None and rows[0].y == 620100.0,
+          "an unquoted comma in an address shifts the cells, so Y reads "
+          "the X value")
     path = put("extra.csv", "K,V\n2,b,\"x\ny\"\n3,c\n")
     check([r.line for r in read_csv(path)[0]] == [2, 4],
           "a quoted newline in an extra cell does not move the line either")
     raises(lambda: read_csv(put("dup.csv", "K,V,V\n1,a,b\n")),
            "a repeated column name is refused, the CSV reader would keep "
            "the last and drop the first  <-- pinned defect")
+    raises(lambda: read_csv(put("blanknames.csv", "K,,\n1,2,3\n")),
+           "two empty column names are refused as a repeated name")
     check(read_csv(put("empty.csv", ""))[1] == [],
           "an empty file has no header")
     rows = extract_rows([{"K": "1", "X": "1,000", "Y": "5", "A": ""}],
@@ -1086,12 +1321,25 @@ def _self_test(tmp):
     check("USE" not in out.split("keys whose attributes")[1].split("keys only")
           [0], "an unchanged column is not listed")
     check(err == "", "and nothing is on stderr")
-    code, out, err = run_cli([old_path, new_path])
+    code, out, err = run_cli([old_path, new_path, "--skip-reuse-check"])
     check(code == 0 and "key reuse: NOT CHECKED" in out
+          and "named (--skip-reuse-check)" in out
           and out.rstrip().endswith("Key reuse was not checked.")
           and "  CHANGED    3" in out,
           "the same files with no geometry column diff and say reuse was "
           "not checked")
+    check("columns only one vintage has" not in out,
+          "two vintages with the same columns print no column note")
+    code, out, err = run_cli([old_path, new_path])
+    check(code == 4 and "VERDICT: UNVERIFIED, key reuse was not checked" in out
+          and "--skip-reuse-check" in out,
+          "the same files with no geometry column and no flag exit 4, and "
+          "the verdict names the flag  <-- pinned defect")
+    code, out, _ = run_cli(base + ["--reuse-distance", "800", "--area-ratio",
+                                   "3", "--units", "m"])
+    check("by centroid moved above 800.0 m or area ratio above 3.00" in out
+          and "P-4  centroid moved 10065.8 m" in out,
+          "the run prints the thresholds and the unit it used")
     code, out, _ = run_cli(base + ["--compare-fields", "USE"])
     check(code == 1 and "  CHANGED    0" not in out
           and "OWNER:" not in out,
@@ -1109,7 +1357,7 @@ def _self_test(tmp):
           "looser thresholds turn both reissued keys into plain edits")
     code, out, _ = run_cli([old_path, put("new2.csv", NEW_CSV.replace(
         "PARCEL,X,Y,ACRES,OWNER,USE", "PARCEL,X,Y,ACRES,OWNER,ZONE")),
-        "--key-field", "PARCEL"])
+        "--key-field", "PARCEL", "--skip-reuse-check"])
     check(code == 0 and "columns only one vintage has, not compared: USE, "
           "ZONE" in out,
           "a column only one vintage has is named, not skipped silently")
@@ -1124,14 +1372,18 @@ def _self_test(tmp):
     code, out, _ = run_cli([old_path, dupe_new, "--out", out_path,
                             "--apply"])
     check(code == 3 and not os.path.exists(out_path)
-          and "Refused." in out,
+          and "Refused. %s was not written" % out_path in out
+          and "wrote " not in out,
           "a refused run writes nothing even with --apply")
     gap = put("gap.csv", "PARCEL,OWNER\n,Ames\nP-1,Baker\n")
     code, out, _ = run_cli([gap, gap])
     check(code == 3 and "old line 2 has no key" in out,
           "a blank key exits 3")
-    code, out, _ = run_cli([gap, gap, "--allow-blank-keys"])
-    check(code == 0 and "  UNKEYED    2" in out,
+    code, out, _ = run_cli([gap, gap, "--allow-blank-keys",
+                            "--skip-reuse-check"])
+    check(code == 0 and "  UNKEYED    2" in out
+          and "VERDICT: clean. 0 changed, 0 added, 0 removed, 2 row(s) left "
+          "out because they have no key." in out,
           "--allow-blank-keys counts the blank rows and diffs the rest")
     zeros_old = put("z_old.csv", "PARCEL,OWNER\n0012,A\n0013,B\n")
     zeros_new = put("z_new.csv", "PARCEL,OWNER\n12,A\n13,B\n")
@@ -1139,6 +1391,14 @@ def _self_test(tmp):
     check(code == 4 and "VERDICT: UNVERIFIED" in out,
           "the leading-zero case exits 4 through the CLI "
           " <-- pinned defect")
+    zero_out = os.path.join(tmp, "zero_out.csv")
+    code, out, _ = run_cli([zeros_old, zeros_new, "--out", zero_out,
+                            "--apply"])
+    check(code == 4 and not os.path.exists(zero_out)
+          and "Unverified. %s was not written" % zero_out in out
+          and "wrote " not in out,
+          "an UNVERIFIED run writes no file even with --apply, so a job "
+          "never reads a plausible diff from it  <-- pinned defect")
     sep_old = put("s_old.csv", "PARCEL,X,Y\nA,\"620,100\",1580200\n")
     code, out, _ = run_cli([sep_old, sep_old, "--x-field", "X", "--y-field",
                             "Y"])
@@ -1149,12 +1409,14 @@ def _self_test(tmp):
     code, out, _ = run_cli([comp_path, comp_path, "--key-field", "BOOK"])
     check(code == 3, "a composite key's first column alone is refused")
     code, out, _ = run_cli([comp_path, comp_path, "--key-field",
-                            "BOOK, PAGE"])
+                            "BOOK, PAGE", "--skip-reuse-check"])
     check(code == 0 and "key BOOK|PAGE" in out,
           "naming both columns makes the key unique, spaces and all")
 
     # ---- usage errors
-    check(run_cli([])[0] == 64, "a run with no vintage is a usage error")
+    code, _, err = run_cli([])
+    check(code == 64 and "two CSV vintages are required" in err,
+          "a run with no vintage is a usage error")
     check(run_cli([old_path])[0] == 64, "one vintage is a usage error too")
     code, out, err = run_cli(base + ["--out", out_path, "--ap"])
     check(code == 64 and "unrecognized arguments: --ap" in err
@@ -1167,24 +1429,51 @@ def _self_test(tmp):
     code, _, err = run_cli(base + ["--key"])
     check(code == 64, "a prefix of --key-field is refused")
     check(run_cli(["--help"])[0] == 0, "--help still exits 0")
-    check(run_cli(base + ["--apply"])[0] == 64,
+    code, _, err = run_cli(base + ["--apply"])
+    check(code == 64 and "--apply needs --out" in err,
           "--apply without --out is a usage error")
-    check(run_cli([old_path, new_path, "--x-field", "X"])[0] == 64,
+    code, _, err = run_cli([old_path, new_path, "--x-field", "X"])
+    check(code == 64 and "go together" in err,
           "--x-field without --y-field is a usage error")
-    check(run_cli([old_path, new_path, "--key-field", " , "])[0] == 64,
+    code, _, err = run_cli([old_path, new_path, "--key-field", " , "])
+    check(code == 64 and "--key-field names no column" in err,
           "a key field list with no name in it is a usage error")
-    check(run_cli(base + ["--sample", "-1"])[0] == 64,
+    code, _, err = run_cli(base + ["--sample", "-1"])
+    check(code == 64 and "--sample cannot be negative" in err,
           "a negative sample is a usage error")
+    code, _, err = run_cli(base + ["--compare-fields", ","])
+    check(code == 64 and "--compare-fields names no column" in err,
+          "--compare-fields with no name in it is a usage error, not 'every "
+          "shared column'  <-- pinned defect")
+    code, _, err = run_cli([old_path, new_path, "--skip-reuse-check",
+                            "--area-field", "ACRES"])
+    check(code == 64 and "contradicts" in err,
+          "--skip-reuse-check beside a geometry column is a usage error")
+    code, _, err = run_cli(base + ["--min-measured", "1.5"])
+    check(code == 64 and "minimum measured share" in err,
+          "a measured floor over 1 is a usage error")
+    code, _, err = run_cli([put("blank_names.csv", "PARCEL,,\nA,1,2\n"),
+                            old_path])
+    check(code == 64 and "repeated: (blank name)" in err,
+          "two empty column names are a usage error that says what they are")
+    utf16 = os.path.join(tmp, "utf16.csv")
+    with open(utf16, "wb") as handle:
+        handle.write(u"PARCEL,OWNER\nA,B\n".encode("utf-16"))
+    code, _, err = run_cli([utf16, utf16, "--skip-reuse-check"])
+    check((code == 64 and "lacks column(s): PARCEL" in err)
+          or (code == 2 and "NUL" in err),
+          "a UTF-16 export is refused: as a missing column on Python 3.11 "
+          "and later, and as a NUL byte on 3.9 and 3.10")
     code, _, err = run_cli(base + ["--reuse-distance", "0.5"])
     check(code == 64 and "reuse distance" in err,
           "a reuse distance under the move tolerance is a usage error")
     code, _, err = run_cli(base + ["--out", old_path])
     check(code == 64 and "also an input vintage" in err
-          and open(old_path, encoding="utf-8").read() == OLD_CSV,
+          and slurp(old_path) == OLD_CSV,
           "--out naming an input is refused on a dry run, and the input is "
           "untouched  <-- pinned defect")
     check(run_cli(base + ["--out", new_path, "--apply"])[0] == 64
-          and open(new_path, encoding="utf-8").read() == NEW_CSV,
+          and slurp(new_path) == NEW_CSV,
           "and with --apply the new vintage survives")
     code, _, err = run_cli([old_path, new_path, "--key-field", "NOPE"])
     check(code == 64 and "lacks column(s): NOPE" in err,
@@ -1211,11 +1500,102 @@ def _self_test(tmp):
                             "Y", "--projected"])
     check(code == 0, "--projected skips the degrees check")
 
+    # ---- what a clean exit does not cover (each is a README limit)
+    def raw_put(name, data):
+        path = os.path.join(tmp, name)
+        with open(path, "wb") as handle:
+            handle.write(data)
+        return path
+
+    keys = ["K%d" % n for n in range(1000)]
+    full = put("full.csv", "PARCEL,OWNER\n" + "".join(
+        "%s,A\n" % k for k in keys))
+    cut = put("cut.csv", "PARCEL,OWNER\n" + "".join(
+        "%s,A\n" % k for k in keys[:10]))
+    code, out, _ = run_cli([full, cut, "--skip-reuse-check"])
+    check(code == 0 and "VERDICT: clean. 0 changed, 0 added, 990 removed."
+          in out,
+          "a new vintage that holds 10 of 1000 keys exits 0 and lists the "
+          "rest as REMOVED")
+    old_fix = raw_put("cp_old.csv", b"PARCEL,OWNER\nA,Mu\xf1oz\n"
+                                    b"\xe91,a\n\xe82,b\n")
+    new_fix = raw_put("cp_new.csv", b"PARCEL,OWNER\nA,Mu\xe4oz\n"
+                                    b"\xe81,a\n\xe92,b\n")
+    code, out, _ = run_cli([old_fix, new_fix, "--skip-reuse-check"])
+    check(code == 0 and "UNCHANGED  3" in out,
+          "cp1252 owners that differ in one accented letter read as equal, "
+          "and two keys that swap accented letters read as UNCHANGED")
+    collide = raw_put("collide.csv", b"PARCEL,V\n\xe91,a\n\xe81,b\n")
+    code, out, _ = run_cli([collide, collide, "--skip-reuse-check"])
+    check(code == 3 and "key '\ufffd1' is on 2 rows" in out,
+          "two keys that differ only in non-UTF-8 bytes collapse into one "
+          "and are refused as a repeated key")
+
+    def shift(n):
+        return "%.1f" % (n * 0.3048)
+
+    feet = [("P-1", 620100, 1580200), ("P-2", 621000, 1581000),
+            ("P-3", 622600, 1582600)]
+    old_ft = put("crs_old.csv", "PARCEL,X,Y\n" + "".join(
+        "%s,%d,%d\n" % row for row in feet))
+    new_m = put("crs_new.csv", "PARCEL,X,Y\n" + "".join(
+        "%s,%s,%s\n" % (k, shift(x), shift(y)) for k, x, y in feet))
+    code, out, err = run_cli([old_ft, new_m, "--x-field", "X", "--y-field",
+                              "Y"])
+    check(code == 1 and "  REUSED     3" in out and "CRS" not in out + err,
+          "feet against metres shows as every key REUSED and never names "
+          "the CRS")
+    wide = [Row(1, ("a|b", "c"), {}), Row(2, ("a", "b|c"), {})]
+    report = compare(wide, wide, skip_reuse=True)
+    check(report.pairs == 2 and [e.key for e in report.entries]
+          == ["a|b|c", "a|b|c"],
+          "two composite keys can print as one label although the tool "
+          "keeps them apart")
+    unlike = compare(vintage(mk(u"\u00e9"), mk("A"), mk(u"B\u200b")),
+                     vintage(mk(u"e\u0301"), mk("a"), mk("B")),
+                     skip_reuse=True)
+    check(unlike.pairs == 0 and gate(unlike) == 4
+          and unlike.counts()[ADDED] == 3 and unlike.counts()[REMOVED] == 3,
+          "NFC against NFD, a case difference and a zero-width space do not "
+          "pair, so the run reports ADDED and REMOVED and exits 4")
+    nl_old = put("nl_old.csv", "PARCEL,OWNER\nP-1,a\n")
+    nl_new = put("nl_new.csv", "PARCEL,OWNER\nP-1,\"b\nc\x1b[31m\"\n")
+    code, out, _ = run_cli([nl_old, nl_new, "--skip-reuse-check"])
+    check("c\x1b[31m' (old line 2, new line 2)" in out.splitlines(),
+          "a line break and a terminal escape in a cell print as they are")
+    eq_path = put("eq.csv", "PARCEL,OWNER\n=1+1,A\n")
+    eq_out = os.path.join(tmp, "eq_out.csv")
+    run_cli([eq_path, eq_path, "--skip-reuse-check", "--out", eq_out,
+             "--apply"])
+    check("UNCHANGED,=1+1,2,2," in slurp(eq_out),
+          "a key that starts with = is written to --out unescaped")
+    hl_old = put("hl_old.csv", OLD_CSV)
+    hl_new = put("hl_new.csv", NEW_CSV)
+    hl_alias = os.path.join(tmp, "hl_alias.csv")
+    os.link(hl_old, hl_alias)
+    code, _, _ = run_cli([hl_old, hl_new, "--skip-reuse-check", "--out",
+                          hl_alias, "--apply"])
+    check(code == 0 and slurp(hl_old).startswith("class,key,"),
+          "a hard link to an input passes the --out check and --apply "
+          "overwrites the input through it")
+
+    class Closed(io.StringIO):
+        def write(self, text):
+            raise BrokenPipeError(32, "Broken pipe")
+
+    shut, shut_err = Closed(), io.StringIO()
+    with contextlib.redirect_stdout(shut), contextlib.redirect_stderr(
+            shut_err):
+        code = main(base)
+    check(code == 70 and "BrokenPipeError" in shut_err.getvalue(),
+          "a pipe closed by the reader ends the run with exit 70")
+
     # ---- writing
     out_path = os.path.join(tmp, "changes.csv")
     code, out, _ = run_cli(base + ["--out", out_path])
     check(code == 1 and not os.path.exists(out_path)
-          and "Check only. " in out,
+          and "Check only. %s was not written. Re-run with --apply." % out_path
+          in out and "wrote " not in out,
           "without --apply the output is not written, and the run says so")
     code, out, _ = run_cli(base + ["--out", out_path, "--apply"])
     check(code == 1 and os.path.exists(out_path)
@@ -1234,9 +1614,23 @@ def _self_test(tmp):
     check(code == 2 and "could not write" in err,
           "a write that fails exits 2, not the 1 that means a reissued key"
           "  <-- pinned defect")
+    real_rows = globals()["classified_rows"]
+    part_path = os.path.join(tmp, "part.csv")
+    try:
+        def half_way(report):
+            yield real_rows(report)[0]
+            raise OSError("probe: disk full")
+        globals()["classified_rows"] = half_way
+        code, _, err = run_cli(base + ["--out", part_path, "--apply"])
+    finally:
+        globals()["classified_rows"] = real_rows
+    check(code == 2 and "disk full" in err and os.path.exists(part_path)
+          and slurp(part_path).count("\n") == 2,
+          "a write that fails half way exits 2 and leaves the partial file "
+          "it had written")
     unkeyed_path = os.path.join(tmp, "unkeyed.csv")
-    run_cli([gap, gap, "--allow-blank-keys", "--out", unkeyed_path,
-             "--apply"])
+    run_cli([gap, gap, "--allow-blank-keys", "--skip-reuse-check", "--out",
+             unkeyed_path, "--apply"])
     with open(unkeyed_path, newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     check([r["class"] for r in rows].count(UNKEYED) == 2
@@ -1253,7 +1647,7 @@ def _self_test(tmp):
     finally:
         globals()["_run"] = real_run
     check(code == 70 and "unexpected RuntimeError" in err
-          and "not a finding" in err,
+          and "not a finding" in err and "Traceback" in err,
           "an unexpected exception exits 70, not the 1 that means a key "
           "was reissued  <-- pinned defect")
     real_self_test = globals()["self_test"]
@@ -1276,7 +1670,7 @@ def _self_test(tmp):
     real_stdout = sys.stdout
     sys.stdout = strict
     try:
-        code = main([odd, odd_new])
+        code = main([odd, odd_new, "--skip-reuse-check"])
         strict.flush()
         shown = strict.buffer.getvalue()
     finally:
@@ -1409,6 +1803,15 @@ def _parse(argv):
                     help="share of the smaller vintage's keys that must be on "
                          "both sides, 0 to 1 (default %.1f)"
                          % DEFAULT_MIN_OVERLAP)
+    ap.add_argument("--min-measured", dest="min_measured", type=float,
+                    default=DEFAULT_MIN_MEASURED,
+                    help="share of the shared keys that each reuse test must "
+                         "have measured, 0 to 1 (default %.1f)"
+                         % DEFAULT_MIN_MEASURED)
+    ap.add_argument("--skip-reuse-check", dest="skip_reuse",
+                    action="store_true",
+                    help="accept a plain diff when no coordinate or area "
+                         "column is named. Without this such a run exits 4.")
     ap.add_argument("--allow-blank-keys", dest="allow_blank",
                     action="store_true",
                     help="leave rows with no key out and count them, instead "
@@ -1492,6 +1895,13 @@ def _run(argv):
     if args.sample < 0:
         print("error: --sample cannot be negative.", file=sys.stderr)
         return 64
+    if args.compare_fields is not None and not _names(args.compare_fields):
+        print("error: --compare-fields names no column.", file=sys.stderr)
+        return 64
+    if args.skip_reuse and (args.x_field or args.area_field):
+        print("error: --skip-reuse-check contradicts --x-field, --y-field "
+              "and --area-field, which turn the check on.", file=sys.stderr)
+        return 64
     if args.apply and not args.out:
         print("error: --apply needs --out.", file=sys.stderr)
         return 64
@@ -1536,7 +1946,8 @@ def _run(argv):
         report = compare(
             old, new, fields, args.reuse_distance, args.area_ratio,
             args.move_tolerance, args.min_overlap, bool(args.x_field),
-            bool(args.area_field), args.allow_blank, args.units)
+            bool(args.area_field), args.allow_blank, args.units,
+            args.min_measured, args.skip_reuse)
     except ValueError as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 64
@@ -1558,6 +1969,10 @@ def _run(argv):
         elif report.refused:
             print("\nRefused. %s was not written, because nothing was "
                   "classified." % args.out)
+        elif unverified_reasons(report):
+            print("\nUnverified. %s was not written, because a file of "
+                  "classes would look like a diff that can be trusted."
+                  % args.out)
         else:
             # A traceback here exits 1, and 1 is the code a scheduled job
             # reads as "a key was reissued". A write that failed is a
