@@ -44,9 +44,17 @@ PASS  a key that jumped 9000 units is REUSED, not an owner edit, and the run exi
 PASS  keys spelled 0012 and 12 pair nothing, so the run exits 4, not 0  <-- pinned defect
 ...
 PASS  a diff with no coordinate and no area column exits 4, not a clean 0  <-- pinned defect
+PASS  an area column that is blank on every row exits 4, not a clean 0  <-- pinned defect
 PASS  one readable pair in fifty exits 4, not a clean 0  <-- pinned defect
 ...
 PASS  --ap is refused, not read as --apply, and writes nothing  <-- pinned defect
+...
+PASS  degrees with one -9999 row are refused, not reported as a clean 'moved 1.8 ft'  <-- pinned defect
+PASS  a renamed only-attribute column exits 4, not a clean 0 over changed owners  <-- pinned defect
+...
+PASS  a new vintage that holds 10 of 1000 keys exits 4, not a clean 0  <-- pinned defect
+...
+PASS  cp1252 owners that differ in one accented letter are refused, not read as equal  <-- pinned defect
 ...
 PASS  a write that fails exits 2, not the 1 that means a reissued key  <-- pinned defect
 ...
@@ -54,10 +62,10 @@ PASS  check() and raises() really do record a failure  <-- pinned defect
 PASS  the footer reports failures by count and by name, and exits 1  <-- pinned defect
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-218 assertions, 0 failed
+234 assertions, 0 failed
 ```
 
-The full run prints all 218 assertions. Each `...` line above is where this block is cut.
+The full run prints all 234 assertions. Each `...` line above is where this block is cut.
 
 ## What already exists
 
@@ -103,11 +111,20 @@ The diff itself is a solved problem. These tools did most of the work before thi
   two files use `nunique()` to count ids for the report. I found no uniqueness check on the id and
   no test of whether a shared id still names the same parcel. I did not run it.
 
+- **datacompy.** A pandas, Polars, Spark and Snowpark comparison library
+  ([capitalone/datacompy](https://github.com/capitalone/datacompy)). It reports which rows match
+  and which columns differ, with tolerances for numbers. Its "Duplicate rows" page says it "will
+  try to handle rows that are duplicate in the join columns" by generating a temporary id inside
+  each group of equal keys, and that the matching of such rows is naive
+  ([pandas usage](https://github.com/capitalone/datacompy/blob/main/docs/source/pandas_usage.rst)).
+  So it compares a repeated key, where this tool refuses one, and I found no test for a unique key
+  that was reissued. I read that page on 2026-10-24 and did not run the library.
+
 I read the three documentation pages on 2026-10-23. I did not run either ArcGIS or QGIS tool, so
 what this README says about them comes from their documentation and nothing more.
 
-Before this repository was public, `gh search repos parceldiff` on 2026-10-22 returned no
-repository with that name. On 2026-10-23 the same search returns only this repository, and
+`gh search repos parceldiff` on 2026-10-22, before the first push, returned no repository with
+that name. On 2026-10-24 the same search returns only this repository, and
 `gh search repos "parcel vintage compare"` and `gh search repos "parcel diff duplicate key"` return
 nothing. A GitHub search finds only what its index holds, so this shows that the search found no
 equivalent, and no more.
@@ -117,17 +134,16 @@ equivalent, and no more.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no
 database. Both vintages are CSVs, which is what every parcel layer can be exported as.
 
-The self-test prints the same 218 assertions on Windows (Python 3.13.2) and on Ubuntu (Python
-3.9.25, 3.10.21, 3.11.16 and 3.12.3). The five outputs have the same checksum, apart from the line
-endings that Windows adds. One assertion is written to hold on every version: on Python 3.9 and
-3.10 the `csv` module refuses a NUL byte, so a UTF-16 file exits 2 there and 64 on 3.11 and later.
-`coverage run --branch parceldiff.py --self-test` reports 100 percent of statements and branches
-(1014 statements, 192 branches) on Windows and on Ubuntu.
+The self-test prints the same 234 assertions on Windows (Python 3.13.2) and on Ubuntu (Python
+3.9.25, 3.10.21, 3.11.16 and 3.12.3). The outputs have the same checksum, apart from the line
+endings that Windows adds. `coverage run --branch parceldiff.py --self-test` reports 100 percent
+of statements and branches (1079 statements, 196 branches) on Windows and on Ubuntu.
 
 The key is compared as text and the geometry is read from columns. The tool measures a straight
 line between two centroids and converts nothing. Both vintages must already be in one projected
-CRS, in feet or in metres. When every coordinate fits longitude (-180 to 180) and latitude (-90 to
-90), the tool refuses the run and says the values look like degrees. A local grid that really sits
+CRS, in feet or in metres. When more than half of the usable coordinates fit longitude (-180 to
+180) and latitude (-90 to 90), the tool refuses the run and says the values look like degrees. A
+few `-9999` no-data rows among degrees do not switch the check off. A local grid that really sits
 inside that box needs `--projected`.
 
 ```
@@ -160,7 +176,7 @@ python parceldiff.py old.csv new.csv --x-field X --y-field Y --area-field ACRES 
 | `--reuse-distance` | `500` | A centroid shift above this means the key names a different parcel. |
 | `--area-ratio` | `2.0` | An area factor above this means the key names a different parcel. |
 | `--move-tolerance` | `1.0` | A shift above this, and not above the reuse distance, counts as a changed geometry. |
-| `--min-overlap` | `0.5` | The share of the smaller vintage's keys that must be on both sides. |
+| `--min-overlap` | `0.5` | The share of the smaller vintage's keys, and of the larger one's, that must be on both sides. |
 | `--min-measured` | `0.9` | The share of the shared keys that each reuse test must have measured. |
 | `--skip-reuse-check` | off | Accept a plain diff when no coordinate or area column is named. Without it such a run exits 4. |
 | `--allow-blank-keys` | off | Leave rows with no key out and count them, instead of refusing the run. |
@@ -344,8 +360,15 @@ VERDICT: UNVERIFIED, no key is on both sides, so nothing was compared. A key spe
 ```
 
 The exit code is 4. A key that pairs fewer than half of the smaller vintage's keys is UNVERIFIED
-too. The floor is `--min-overlap`, and a run at exactly the floor passes. `--min-overlap 0`
-turns the check off.
+too, and so is a vintage that pairs fewer than half of the larger one's keys, which is what an
+export cut off part way through looks like: 10 of 1,000 keys on one side is exit 4. The floor is
+`--min-overlap` for both tests, and a run at exactly the floor passes. `--min-overlap 0` turns
+both off.
+
+A renamed column looks the same. When the two vintages share no column besides the key, and no
+coordinate pair is named, every pair would read as unchanged. The run exits 4 and the verdict says
+that no column was left to compare. When some columns are shared and some are on one side only,
+the run goes ahead, the report lists the columns it skipped, and the verdict counts them.
 
 **Refusal 3: a reuse check that could not look.** The tool counts a pair as measured by a test
 only when both rows give a readable value to that test. The centroid test needs an X and a Y on
@@ -436,9 +459,9 @@ finding and the file lists it.
 |---|---|
 | 0 | A diff was produced, the reuse check ran on enough pairs, and no key was reissued. Changes, additions and removals do not fail the gate. With `--skip-reuse-check` the reuse check did not run, and the verdict says so. |
 | 1 | At least one key now names a different parcel. Do not pair these rows. |
-| 2 | A file could not be read, or `--out` could not be written. |
+| 2 | A file could not be read (a file that is not UTF-8 counts), or `--out` could not be written. |
 | 3 | Refused. A key is on more than one row, or a row has no key, so nothing was compared. |
-| 4 | The run could not be trusted. No key is on both sides, too few are, a requested reuse test measured too few pairs, or no reuse test was asked for. |
+| 4 | The run could not be trusted. No key is on both sides, too few are on both sides of either vintage, no column was left to compare after a rename, a requested reuse test measured too few pairs, or no reuse test was asked for. |
 | 64 | Usage error, including a column that is not in the CSV, a repeated column name, an unknown or abbreviated flag, an output path that is an input, and coordinates that look like degrees. |
 | 70 | An unexpected crash. This is a fault in the tool and not a finding. The traceback is on stderr. |
 
@@ -481,21 +504,19 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
 - A composite key joins its parts with `|` for display. The keys `a|b` plus `c`, and `a` plus
   `b|c`, are different keys to the tool but both print as `a|b|c` in the report and in `--out`.
 - A placeholder coordinate such as `0,0` is read as a real point. Blank out missing coordinates
-  before the run.
+  before the run. If most rows of a projected layer hold such a placeholder, the degrees check
+  refuses the run, and `--projected` turns it off.
 - A coordinate cell is read with Python `float()`, so underscores are accepted as digits. `1_000`
   reads as 1000. A thousands separator such as `1,000` is not a number and reads as no coordinate.
 - The columns named in `--x-field` and `--y-field` are not compared as attributes. A coordinate
   that moves by less than the move tolerance is not listed as `CHANGED`. A coordinate that cannot
   be read is listed as not measured, and nothing more.
-- Only UTF-8 CSV is supported. Other encodings are decoded with `errors="replace"` and no warning.
-  Every byte that is not UTF-8 becomes U+FFFD, so two Windows-1252 owners that differ only in an
-  accented letter read as equal. Two keys that swap accented letters, such as `e-acute 1` and
-  `e-grave 2`, swapped, read as `UNCHANGED` with exit 0. Two different keys can also collapse
-  into one. Such a pair is refused as a repeated key, which is the safe direction. Save the CSV as
-  UTF-8.
-- A UTF-16 export, such as Excel "Unicode Text", is refused, but the message does not name the
-  encoding. On Python 3.11 and later it says the CSV lacks a column and exits 64. On 3.9 and 3.10
-  the `csv` module stops on the NUL byte and the run exits 2.
+- Only UTF-8 CSV is supported. A file with a byte that is not UTF-8, such as Excel "CSV (Comma
+  delimited)" saved in Windows-1252, stops the run with exit 2 and names the file. Decoding such a
+  byte to a replacement character made two owners that differ in one accented letter read as
+  equal, so the tool refuses instead. Save the CSV as UTF-8.
+- A UTF-16 export, such as Excel "Unicode Text", is refused the same way, as not UTF-8, with exit
+  2 on every Python version.
 - A character the console cannot show prints as `?` instead of stopping the run. The file the
   tool writes is always UTF-8.
 - A short row has its missing cells read as blank, and a long row has its extra cells ignored.
@@ -507,14 +528,15 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
 - Keys and detail text print as they are. A quoted line break in a cell splits the report line in
   two, and a terminal escape sequence in a cell goes to the console unchanged. Review an untrusted
   CSV as text first.
-- A new vintage that holds a subset of the old keys exits 0 and lists the rest as `REMOVED`. The
-  overlap floor uses the smaller vintage, and removals do not fail the gate. A vintage that kept
-  10 of 1,000 keys gave `0 changed, 0 added, 990 removed` and exit 0. Read the `REMOVED` count
-  yourself.
+- A new vintage that keeps a smaller share of the old keys than `--min-overlap` exits 4. A vintage
+  that keeps more than that, such as 600 of 1,000 keys, exits 0 and lists the rest as `REMOVED`,
+  because removals do not fail the gate. Read the `REMOVED` count yourself. A new vintage that is
+  more than twice as large, because of additions, exits 4 for the same reason.
 - `--allow-blank-keys` leaves the keyless rows out of the diff. The verdict counts them, but the
   exit code stays 0, because you asked for that.
 - It reads both files into memory. A run of 200,000 rows a side, with the centroid and area tests
-  on, took about 7 seconds on one Windows workstation. I did not time it on the Ubuntu host.
+  on, took about 7 seconds on one unloaded Windows workstation and about 14 seconds on a busy one.
+  Timing depends on the machine. I did not time it on the Ubuntu host.
 - Output files are written in place, not through a temporary file. `--out` onto an existing file
   replaces it. A failed write can leave a partial file, and the exit code is 2.
 - The check that `--out` is not an input compares real paths and nothing else. A hard link to an
@@ -524,14 +546,43 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
   applies to Windows.
 - A key that starts with `=`, `+`, `-` or `@` is written as it came. Open the output as text or
   quote it first, because a spreadsheet may read it as a formula.
-- When the reader closes the pipe early, as in `parceldiff.py ... | head -1`, the print fails and
-  the run ends with exit 70 and a traceback.
+- When the reader closes the pipe early and the output is large, as in `parceldiff.py ...
+  --sample 100000 | head -1` over a 20,000-row run, the print fails and the run ends with exit 70
+  and a traceback. This happened on Windows and on Ubuntu. With the default `--sample` of 10,
+  `| head -1` ends with the verdict's exit code and no traceback.
 - `--self-test` ignores every other valid flag. It writes only to a temporary directory under the
   system temp path, which it removes at the end, even when an assertion raises. It creates one
   hard link there.
 - It opens no socket and imports no network module. There is no network path to test, and no
   credential anywhere in it to leak.
-- Nothing is written without `--apply`, and a run that exits 3 or 4 writes nothing at all.
+- Nothing is written without `--apply`, and a run that exits 3 or 4 writes nothing at all. It also
+  leaves an older file at `--out` as it was, so a nightly job that reuses one `--out` path can read
+  yesterday's classification after today's run was refused. Check the exit code before reading
+  the file.
+- The default `--move-tolerance`, the default `--sample` and the percent figures in messages are
+  not pinned by an assertion.
+- A CSV cell over 131,072 characters, such as a WKT geometry, stops the run with exit 2. A
+  compared column that holds long text prints the whole cell on both sides of every `CHANGED`
+  line, and in `--out`. Leave such a column out with `--compare-fields`.
+- Non-ASCII digit characters, such as Arabic-Indic digits, are also read as numbers, so `123` and
+  its Arabic-Indic form compare as equal and read as a valid coordinate.
+- Trailing empty rows such as `,,,` from a spreadsheet export count as rows with no key, so the
+  run exits 3 until the rows are deleted or `--allow-blank-keys` is passed. That is the safe
+  direction, and the message names the flag.
+- A header-only vintage exits 4 with a message about a key spelled differently on the two sides,
+  which is not the cause when the file is empty. A file with no header at all exits 64 with
+  "lacks column(s)", not 2, so a job that maps 64 to "fix the command line" will misread a failed
+  export. A semicolon- or tab-separated file exits 64 the same way and shows the whole header as
+  one column name. Only comma-separated files are read.
+- Coordinates or areas near the float limits, such as `1e308`, give a `moved inf` line rather than
+  a number. The verdict is still right, but the figure means nothing.
+- On Windows, a device name such as `CON` or `NUL`, or an alternate data stream such as
+  `x.csv:s`, is accepted as `--out`. The run prints `wrote <path>` and exits 0, but no real file
+  appears, or an empty `x.csv` does.
+- Ctrl-C is not caught. An interrupted run ends with a Python traceback and the platform's
+  interrupt status, not one of the codes above.
+- This tool writes a CSV, not a spreadsheet or a feature class, and has no rule for a single
+  column, such as a flag that must never change under one key.
 - Every statement and branch is reached by the self-test, so there is no uncovered line to name.
   Coverage was measured with `coverage run --branch` on Windows and on Ubuntu.
 

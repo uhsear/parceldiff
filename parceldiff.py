@@ -32,8 +32,8 @@ Exit codes: 0 a diff was produced, the reuse check ran on enough pairs, and no
 key was reissued, 1 at least one key now names a different parcel, 2 a file
 could not be read or written, 3 the key was refused (not unique, or blank on
 some row), 4 the run could not be trusted (no key on both sides, too few keys
-on both sides, a reuse check that measured too few pairs, or no reuse check at
-all), 64 usage error, 70 an unexpected crash, which is never a finding.
+on both sides of either vintage, no column left to compare, a reuse check
+that measured too few pairs, or no reuse check at all), 64 usage error, 70 an unexpected crash, which is never a finding.
 """
 
 from __future__ import print_function
@@ -73,9 +73,10 @@ DEFAULT_AREA_RATIO = 2.0
 # it the move is capture noise.
 DEFAULT_MOVE_TOLERANCE = 1.0
 
-# Fraction of the smaller vintage's keys that must be on both sides. Two
-# vintages of one layer share nearly every key. Below this the key is probably
-# spelled differently on the two sides, and the diff has compared nothing real.
+# Fraction of the smaller vintage's keys, and of the larger one's, that must
+# be on both sides. Two vintages of one layer share nearly every key. Below
+# this the key is probably spelled differently on the two sides, or one export
+# was cut short, and the diff has compared nothing real.
 DEFAULT_MIN_OVERLAP = 0.5
 
 # Share of the shared keys that each requested reuse test must have measured.
@@ -154,6 +155,8 @@ class Report(object):
         self.check_area = False
         self.units = DEFAULT_UNITS
         self.notes = []
+        self.one_sided = []      # columns only one vintage has, not compared
+        self.nothing_to_compare = False  # a rename left no column to compare
 
     @property
     def refused(self):
@@ -174,6 +177,11 @@ class Report(object):
         """Share of the smaller vintage's keys that are on both sides."""
         smaller = min(self.old_keys, self.new_keys)
         return self.pairs / float(smaller) if smaller else 0.0
+
+    def kept(self):
+        """Share of the larger vintage's keys that are on both sides."""
+        larger = max(self.old_keys, self.new_keys)
+        return self.pairs / float(larger) if larger else 0.0
 
 
 def _finite(value):
@@ -374,6 +382,16 @@ def unverified_reasons(report):
                        "differently on the two sides"
                        % (100.0 * report.overlap(),
                           100.0 * report.min_overlap))
+    elif report.kept() < report.min_overlap:
+        reasons.append("the larger vintage has %d keys and only %d are on "
+                       "both sides (%.1f percent, under the %.1f percent "
+                       "floor). A truncated export looks exactly like this"
+                       % (max(report.old_keys, report.new_keys), report.pairs,
+                          100.0 * report.kept(), 100.0 * report.min_overlap))
+    if report.nothing_to_compare:
+        reasons.append("the two vintages share no column to compare besides "
+                       "the key, so every pair would read as unchanged. A "
+                       "renamed column looks exactly like this")
     if not report.checked and not report.skip_reuse:
         reasons.append("key reuse was not checked, because no coordinate or "
                        "area column was named. Name --x-field and --y-field, "
@@ -417,6 +435,9 @@ def verdict(report):
     if report.unmeasured:
         text += (" %d pair(s) could not be measured for key reuse."
                  % len(report.unmeasured))
+    if report.one_sided:
+        text += (" %d column(s) on one side only were not compared."
+                 % len(report.one_sided))
     if not report.checked:
         text += " Key reuse was not checked."
     return 0, text
@@ -560,21 +581,37 @@ def plan_fields(old_header, new_header, key_fields, x_field, y_field,
     return fields, only
 
 
+def note_columns(report, fields, only, has_xy):
+    """Record the columns this run did not compare, on the report.
+
+    A column only one vintage has is not compared. When that leaves nothing
+    to compare (no shared column, no coordinates), every pair reads as
+    unchanged and the run must not call that clean. A layer with only a key
+    column has no `only` and is a plain key diff.
+    """
+    report.one_sided = list(only)
+    report.nothing_to_compare = bool(only) and not fields and not has_xy
+    if only:
+        report.notes.append("columns only one vintage has, not compared: %s"
+                            % ", ".join(only))
+
+
 def looks_like_degrees(rows):
-    """True when every usable coordinate fits longitude and latitude.
+    """True when more than half of the usable coordinates fit longitude and
+    latitude.
 
     Degrees in X and Y fail silently: every shift is a fraction of a degree,
     so no key is ever judged reissued against a threshold of feet. A
-    projected layer leaves the +-180 and +-90 box at once.
+    projected layer leaves the +-180 and +-90 box at once. A majority, not
+    every row: one -9999 no-data row must not switch the guard off.
     """
-    seen = False
+    inside = usable = 0
     for row in rows:
         if row.x is None or row.y is None:
             continue
-        seen = True
-        if abs(row.x) > 180.0 or abs(row.y) > 90.0:
-            return False
-    return seen
+        usable += 1
+        inside += abs(row.x) <= 180.0 and abs(row.y) <= 90.0
+    return usable > 0 and 2 * inside > usable
 
 
 # ----------------------------------------------------------------- the file
@@ -596,14 +633,25 @@ def _breaks(value):
 def read_csv(path):
     """Raw rows and the header of a CSV, as dicts with a .line attribute.
 
-    utf-8-sig, because Excel and Esri's Table To Table write a UTF-8 BOM that
-    would otherwise glue itself to the first column name. DictReader keeps the
+    utf-8-sig, because some exports start with a UTF-8 BOM that would
+    otherwise glue itself to the first column name. A byte that is not UTF-8
+    stops the run (csv.Error, exit 2): decoding it to U+FFFD made two owners
+    that differ by one accented letter read as equal. DictReader keeps the
     last of two columns with one name and drops the other without a word, so a
     repeated column name is refused here. The line is the one the record
     starts on: a quoted newline and a blank line do not move it.
     """
-    with open(path, "r", newline="", encoding="utf-8-sig",
-              errors="replace") as handle:
+    try:
+        return _read_rows(path)
+    except UnicodeDecodeError as exc:
+        raise csv.Error("%s is not UTF-8 (%s). Save the CSV as UTF-8, for "
+                        "example Excel's 'CSV UTF-8'. Reading it anyway "
+                        "would make two different values look equal."
+                        % (path, exc.reason))
+
+
+def _read_rows(path):
+    with open(path, "r", newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
         header = list(reader.fieldnames or [])
         repeated = sorted(set(n for n in header if header.count(n) > 1))
@@ -1137,6 +1185,32 @@ def _self_test(tmp):
           and "measured only 1 of 2 pair(s)" in describe(report)[-1],
           "a readable area does not stand in for an unreadable coordinate"
           "  <-- pinned defect")
+    def areas(total, readable):
+        """total keys; only the first readable have an area, none a point."""
+        return vintage(*[mk("K%d" % n, area=1.0 if n < readable else None)
+                         for n in range(total)])
+
+    report = compare(areas(3, 0), areas(3, 0), check_area=True)
+    check(gate(report) == 4 and report.measured_area == 0
+          and "the area test measured no pair" in describe(report)[-1],
+          "an area column that is blank on every row exits 4, not a clean 0"
+          "  <-- pinned defect")
+    report = compare(areas(10, 7), areas(10, 7), check_area=True)
+    check(gate(report) == 4 and report.measured_area == 7
+          and "the area test measured only 7 of 10 pair(s), under the 90 "
+          "percent floor" in describe(report)[-1],
+          "seven readable areas in ten is under the floor and exits 4"
+          "  <-- pinned defect")
+    report = compare(areas(10, 9), areas(10, 9), check_area=True)
+    check(gate(report) == 0 and report.measured_area == 9
+          and report.unmeasured == [("K9", "area")],
+          "nine readable areas in ten is exactly the floor and passes")
+    report = compare(areas(2, 1), areas(2, 2), check_area=True)
+    check(gate(report) == 4 and report.measured_area == 1,
+          "an area that is unreadable on one side only is not measured")
+    zero_area = vintage(mk("a", area=0.0), mk("b", area=-1.0))
+    check(gate(compare(zero_area, zero_area, check_area=True)) == 4,
+          "a zero or negative area is not measured either")
     report = compare(spread(2, 0, 1.0), spread(2, 0, 1.0), check_xy=True,
                      check_area=True)
     check(gate(report) == 4 and report.measured_area == 2
@@ -1254,6 +1328,15 @@ def _self_test(tmp):
     check(not looks_like_degrees(vintage(mk("a", 10.0, 1580200.0)))
           and not looks_like_degrees(vintage(mk("a", 620100.0, 10.0))),
           "one coordinate outside the box is enough to say projected")
+    sentinel = vintage(mk("a", -82.1, 29.2), mk("b", -82.2, 29.3),
+                       mk("c", -9999.0, -9999.0))
+    check(looks_like_degrees(sentinel),
+          "one -9999 no-data row among degrees does not switch the guard "
+          "off  <-- pinned defect")
+    check(not looks_like_degrees(vintage(
+        mk("a", -82.1, 29.2), mk("b", -9999.0, -9999.0),
+        mk("c", -9999.0, -9999.0))),
+          "a file that is mostly sentinels is not read as degrees")
     check(not looks_like_degrees(vintage(mk("a"))),
           "no coordinates is not degrees")
     check(looks_like_degrees(vintage(mk("a", 180.0, 90.0)))
@@ -1460,10 +1543,9 @@ def _self_test(tmp):
     with open(utf16, "wb") as handle:
         handle.write(u"PARCEL,OWNER\nA,B\n".encode("utf-16"))
     code, _, err = run_cli([utf16, utf16, "--skip-reuse-check"])
-    check((code == 64 and "lacks column(s): PARCEL" in err)
-          or (code == 2 and "NUL" in err),
-          "a UTF-16 export is refused: as a missing column on Python 3.11 "
-          "and later, and as a NUL byte on 3.9 and 3.10")
+    check(code == 2 and "is not UTF-8" in err,
+          "a UTF-16 export is refused as not UTF-8, on every Python "
+          "version  <-- pinned defect")
     code, _, err = run_cli(base + ["--reuse-distance", "0.5"])
     check(code == 64 and "reuse distance" in err,
           "a reuse distance under the move tolerance is a usage error")
@@ -1499,6 +1581,44 @@ def _self_test(tmp):
     code, out, _ = run_cli([degrees, degrees, "--x-field", "X", "--y-field",
                             "Y", "--projected"])
     check(code == 0, "--projected skips the degrees check")
+    dg_old = put("dg_old.csv", "PARCEL,X,Y\nA,-82.1,29.2\nB,-82.2,29.3\n"
+                               "C,-9999,-9999\n")
+    dg_new = put("dg_new.csv", "PARCEL,X,Y\nA,-82.1,29.2\nB,-81.0,28.0\n"
+                               "C,-9999,-9999\n")
+    code, out, err = run_cli([dg_old, dg_new, "--x-field", "X", "--y-field",
+                              "Y"])
+    check(code == 64 and "look like degrees" in err and out == "",
+          "degrees with one -9999 row are refused, not reported as a clean "
+          "'moved 1.8 ft'  <-- pinned defect")
+
+    # ---- a column that was renamed or dropped
+    drift_a = put("drift_a.csv", "PARCEL,OWNER\nA,x\nB,y\n")
+    drift_b = put("drift_b.csv", "PARCEL,OWNER_NAME\nA,z\nB,w\n")
+    code, out, _ = run_cli([drift_a, drift_b, "--skip-reuse-check"])
+    check(code == 4 and "share no column to compare" in out
+          and "VERDICT: clean" not in out
+          and "columns only one vintage has, not compared: OWNER, "
+              "OWNER_NAME" in out,
+          "a renamed only-attribute column exits 4, not a clean 0 over "
+          "changed owners  <-- pinned defect")
+    part_a = put("part_a.csv", "PARCEL,OWNER,USE\nA,x,r\nB,y,r\n")
+    part_b = put("part_b.csv", "PARCEL,OWNER_NAME,USE\nA,z,r\nB,w,r\n")
+    code, out, _ = run_cli([part_a, part_b, "--skip-reuse-check"])
+    check(code == 0 and "2 column(s) on one side only were not compared."
+          in out.splitlines()[-1],
+          "a partly renamed layer still runs, and the verdict counts the "
+          "columns it skipped  <-- pinned defect")
+    keys_only = put("keys_only.csv", "PARCEL\nA\nB\n")
+    code, out, _ = run_cli([keys_only, keys_only, "--skip-reuse-check"])
+    check(code == 0 and "VERDICT: clean. 0 changed" in out,
+          "a layer of keys alone is a plain key diff, not a renamed column")
+    xy_a = put("xy_a.csv", "PARCEL,X,Y,OWNER\nA,1,1,x\nB,2,2,y\n")
+    xy_b = put("xy_b.csv", "PARCEL,X,Y,OWNER_NAME\nA,1,1,x\nB,2,2,y\n")
+    code, out, _ = run_cli([xy_a, xy_b, "--x-field", "X", "--y-field", "Y",
+                            "--projected"])
+    check(code == 0 and "VERDICT: clean" in out,
+          "a renamed column beside a coordinate pair still compares the "
+          "geometry")
 
     # ---- what a clean exit does not cover (each is a README limit)
     def raw_put(name, data):
@@ -1513,23 +1633,37 @@ def _self_test(tmp):
     cut = put("cut.csv", "PARCEL,OWNER\n" + "".join(
         "%s,A\n" % k for k in keys[:10]))
     code, out, _ = run_cli([full, cut, "--skip-reuse-check"])
-    check(code == 0 and "VERDICT: clean. 0 changed, 0 added, 990 removed."
-          in out,
-          "a new vintage that holds 10 of 1000 keys exits 0 and lists the "
-          "rest as REMOVED")
+    check(code == 4 and "the larger vintage has 1000 keys and only 10 are on "
+          "both sides" in out and "VERDICT: clean" not in out,
+          "a new vintage that holds 10 of 1000 keys exits 4, not a clean 0"
+          "  <-- pinned defect")
+    code, out, _ = run_cli([cut, full, "--skip-reuse-check"])
+    check(code == 4 and "only 10 are on both sides" in out,
+          "the same truncation on the old side exits 4 too")
+    code, out, _ = run_cli([full, cut, "--skip-reuse-check",
+                            "--min-overlap", "0"])
+    check(code == 0 and "0 changed, 0 added, 990 removed." in out,
+          "--min-overlap 0 turns both overlap floors off")
     old_fix = raw_put("cp_old.csv", b"PARCEL,OWNER\nA,Mu\xf1oz\n"
                                     b"\xe91,a\n\xe82,b\n")
     new_fix = raw_put("cp_new.csv", b"PARCEL,OWNER\nA,Mu\xe4oz\n"
                                     b"\xe81,a\n\xe92,b\n")
-    code, out, _ = run_cli([old_fix, new_fix, "--skip-reuse-check"])
-    check(code == 0 and "UNCHANGED  3" in out,
-          "cp1252 owners that differ in one accented letter read as equal, "
-          "and two keys that swap accented letters read as UNCHANGED")
-    collide = raw_put("collide.csv", b"PARCEL,V\n\xe91,a\n\xe81,b\n")
-    code, out, _ = run_cli([collide, collide, "--skip-reuse-check"])
-    check(code == 3 and "key '\ufffd1' is on 2 rows" in out,
-          "two keys that differ only in non-UTF-8 bytes collapse into one "
-          "and are refused as a repeated key")
+    code, out, err = run_cli([old_fix, new_fix, "--skip-reuse-check"])
+    check(code == 2 and "is not UTF-8" in err and "cp_old.csv" in err
+          and out == "",
+          "cp1252 owners that differ in one accented letter are refused, "
+          "not read as equal  <-- pinned defect")
+    code, out, err = run_cli([new_fix, old_fix, "--skip-reuse-check"])
+    check(code == 2 and "cp_new.csv" in err,
+          "the refusal names whichever file is not UTF-8")
+    utf8_fix = put("utf8_fix.csv", u"PARCEL,OWNER\nA,Mu\u00f1oz\n")
+    code, out, _ = run_cli([utf8_fix, utf8_fix, "--skip-reuse-check"])
+    check(code == 0 and "UNCHANGED  1" in out,
+          "the same text saved as UTF-8 reads")
+    code, out, err = run_cli([utf8_fix, old_fix, "--skip-reuse-check"])
+    check(code == 2 and "cp_old.csv" in err,
+          "a UTF-8 vintage against a cp1252 one is refused, not reported as "
+          "a change  <-- pinned defect")
 
     def shift(n):
         return "%.1f" % (n * 0.3048)
@@ -1664,7 +1798,7 @@ def _self_test(tmp):
     odd = put("odd.csv", "")
     odd_new = put("odd_new.csv", "PARCEL,OWNER\nZ,A\nB,C\n")
     with open(odd, "wb") as handle:
-        handle.write(b"PARCEL,OWNER\n\xff,A\nZ,A\n")
+        handle.write(u"PARCEL,OWNER\n\u4e2d,A\nZ,A\n".encode("utf-8"))
     strict = io.TextIOWrapper(io.BytesIO(), encoding="cp1252",
                               errors="strict")
     real_stdout = sys.stdout
@@ -1729,8 +1863,14 @@ def _self_test(tmp):
         sys.stdout = quiet
     probe = failed[mark:]
     del failed[mark:]
-    check(len(probe) == 3,
-          "check() and raises() really do record a failure  <-- pinned defect")
+    # Judged without check(): a check() that always passed would pass its own
+    # probe. This line does the counting check() does, with no branch to miss.
+    probe_ok = len(probe) == 3
+    probe_label = ("check() and raises() really do record a failure  "
+                   "<-- pinned defect")
+    passed[0] += probe_ok
+    failed.extend([probe_label] * (not probe_ok))
+    print("%s  %s" % ("PASS" if probe_ok else "FAIL", probe_label))
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -1800,9 +1940,9 @@ def _parse(argv):
                          "changed (default %.1f)" % DEFAULT_MOVE_TOLERANCE)
     ap.add_argument("--min-overlap", dest="min_overlap", type=float,
                     default=DEFAULT_MIN_OVERLAP,
-                    help="share of the smaller vintage's keys that must be on "
-                         "both sides, 0 to 1 (default %.1f)"
-                         % DEFAULT_MIN_OVERLAP)
+                    help="share of the smaller vintage's keys, and of the "
+                         "larger one's, that must be on both sides, 0 to 1 "
+                         "(default %.1f)" % DEFAULT_MIN_OVERLAP)
     ap.add_argument("--min-measured", dest="min_measured", type=float,
                     default=DEFAULT_MIN_MEASURED,
                     help="share of the shared keys that each reuse test must "
@@ -1841,9 +1981,9 @@ def _names(text):
 def _tolerate_odd_characters():
     """Make print() unable to fail on a character the console cannot encode.
 
-    A piped stdout on Windows is cp1252, and a key read from a file that is
-    not UTF-8 arrives as U+FFFD, which cp1252 cannot write. The
-    UnicodeEncodeError would exit 1 and the VERDICT line would never print.
+    A piped stdout on Windows is cp1252, and a key from a UTF-8 file may hold
+    a character cp1252 cannot write. The UnicodeEncodeError would exit 1 and
+    the VERDICT line would never print.
     """
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -1951,9 +2091,7 @@ def _run(argv):
     except ValueError as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 64
-    if only:
-        report.notes.append("columns only one vintage has, not compared: %s"
-                            % ", ".join(only))
+    note_columns(report, fields, only, bool(args.x_field))
 
     # After compare, so a usage error leaves stdout empty rather than looking
     # like the start of a run that went well.
