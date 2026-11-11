@@ -56,16 +56,20 @@ PASS  a new vintage that holds 10 of 1000 keys exits 4, not a clean 0  <-- pinne
 ...
 PASS  cp1252 owners that differ in one accented letter are refused, not read as equal  <-- pinned defect
 ...
+PASS  a key that starts with = is written to --out with a leading apostrophe, so a spreadsheet does not run it  <-- pinned defect
+PASS  every leader (= + - @ tab and CR) gets an apostrophe in the key column  <-- pinned defect
+PASS  every leader (= + - @ tab and CR) gets an apostrophe in the detail column  <-- pinned defect
+...
 PASS  a write that fails exits 2, not the 1 that means a reissued key  <-- pinned defect
 ...
 PASS  check() and raises() really do record a failure  <-- pinned defect
 PASS  the footer reports failures by count and by name, and exits 1  <-- pinned defect
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-234 assertions, 0 failed
+241 assertions, 0 failed
 ```
 
-The full run prints all 234 assertions. Each `...` line above is where this block is cut.
+The full run prints all 241 assertions. Each `...` line above is where this block is cut.
 
 ## What already exists
 
@@ -134,10 +138,10 @@ equivalent, and no more.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no
 database. Both vintages are CSVs, which is what every parcel layer can be exported as.
 
-The self-test prints the same 234 assertions on Windows (Python 3.13.2) and on Ubuntu (Python
-3.9.25, 3.10.21, 3.11.16 and 3.12.3). The outputs have the same checksum, apart from the line
-endings that Windows adds. `coverage run --branch parceldiff.py --self-test` reports 100 percent
-of statements and branches (1079 statements, 196 branches) on Windows and on Ubuntu.
+The self-test prints the same 241 assertions on Windows (Python 3.13.2 and 3.9.25) and on Ubuntu
+(Python 3.12.3). The Windows 3.13.2 and Ubuntu 3.12.3 outputs have the same SHA-256, apart from the
+line endings that Windows adds. `coverage run --branch parceldiff.py --self-test` reports 100
+percent of statements and branches (1110 statements, 202 branches) on Windows and on Ubuntu.
 
 The key is compared as text and the geometry is read from columns. The tool measures a straight
 line between two centroids and converts nothing. Both vintages must already be in one projected
@@ -448,6 +452,20 @@ ADDED,P-7,,7,
 REMOVED,P-5,6,,
 ```
 
+A cell that a spreadsheet would read as a formula is written with one apostrophe in front. The
+text columns `key` and `detail` carry text that came from the input files: a key can be `=1+1` or
+`-5`, and `detail` starts with a column name, which is a header cell of the input. When one of them
+starts with `=`, `+`, `-`, `@`, a tab or a carriage return, the file holds `'=1+1`, `'-5` or
+`'-OWNER: 'a' -> 'b'`. The `class` column is always one of the six class names, and `old_line` and
+`new_line` are plain integers or blank, so they are never changed and stay numbers. The cost is
+that a key such as `-5` is written as `'-5`. The apostrophe is part of the text, so a program
+that reads the CSV sees it, and I did not check how Excel displays it.
+The tool does not read its own `--out` back as a vintage, so it has no code that removes the
+apostrophe. Strip one leading apostrophe yourself if another program reads the file. The self-test
+writes all six leaders to both text columns through `write_classified`, and a key and a column
+name through the command line. It breaks (6 assertions fail) when the guard is switched off. The
+guard is the mitigation that [OWASP names for CSV injection](https://owasp.org/www-community/attacks/CSV_Injection).
+
 A run that exits 3 or 4 writes nothing, even with `--apply`, because a file of classes looks like
 a diff that can be trusted. It prints `Refused. ... was not written` for exit 3 and `Unverified.
 ... was not written` for exit 4. A run that exits 1 writes the file, because a reissued key is a
@@ -544,8 +562,12 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
   that with a hard link. On Windows, an extended-length path such as `//?/C:/path/old.csv` passed
   the same check when I tried it by hand. The self-test does not cover that form, because it only
   applies to Windows.
-- A key that starts with `=`, `+`, `-` or `@` is written as it came. Open the output as text or
-  quote it first, because a spreadsheet may read it as a formula.
+- The formula guard covers the first character only: `=`, `+`, `-`, `@`, tab and carriage return.
+  OWASP also lists a line feed and the full-width forms of `=`, `+`, `-` and `@`. The tool does not
+  guard those, and a value that starts with a space is not changed. OWASP also warns that Excel
+  may remove quotes or escape characters when a person saves the file again and opens it, which
+  can bring the formula back. The tool cannot prevent that. The OWASP page is cited under "The
+  output file".
 - When the reader closes the pipe early and the output is large, as in `parceldiff.py ...
   --sample 100000 | head -1` over a 20,000-row run, the print fails and the run ends with exit 70
   and a traceback. This happened on Windows and on Ubuntu. With the default `--sample` of 10,

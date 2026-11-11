@@ -685,12 +685,33 @@ def extract_rows(raw_rows, key_fields, x_field, y_field, area_field):
     return out
 
 
+# A spreadsheet reads a cell that starts with one of these as a formula.
+FORMULA_LEADERS = ("=", "+", "-", "@", chr(9), chr(13))
+# Only the text columns can hold input text. class is one of CLASSES and the
+# two line columns are integers or blank, so a negative-looking value cannot
+# reach them and they stay numeric.
+GUARDED_COLUMNS = ("key", "detail")
+
+
+def cell(value):
+    """A text cell that a spreadsheet will not run as a formula.
+
+    A leading apostrophe is the mitigation OWASP names for CSV injection. The
+    tool never reads its own --out back as a vintage, so nothing strips it.
+    """
+    if value[:1] in FORMULA_LEADERS:
+        return "'" + value
+    return value
+
+
 def write_classified(path, report):
     """Write one row per key, with its class and what changed."""
     with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(OUT_COLUMNS))
         writer.writeheader()
         for row in classified_rows(report):
+            for name in GUARDED_COLUMNS:
+                row[name] = cell(row[name])
             writer.writerow(row)
 
 
@@ -1701,8 +1722,56 @@ def _self_test(tmp):
     eq_out = os.path.join(tmp, "eq_out.csv")
     run_cli([eq_path, eq_path, "--skip-reuse-check", "--out", eq_out,
              "--apply"])
-    check("UNCHANGED,=1+1,2,2," in slurp(eq_out),
-          "a key that starts with = is written to --out unescaped")
+    check("UNCHANGED,'=1+1,2,2," in slurp(eq_out)
+          and "UNCHANGED,=1+1" not in slurp(eq_out),
+          "a key that starts with = is written to --out with a leading "
+          "apostrophe, so a spreadsheet does not run it  <-- pinned defect")
+    hdr_old = put("hdr_old.csv", "PARCEL,-OWNER\nP-1,a\n")
+    hdr_new = put("hdr_new.csv", "PARCEL,-OWNER\nP-1,b\n")
+    hdr_out = os.path.join(tmp, "hdr_out.csv")
+    run_cli([hdr_old, hdr_new, "--skip-reuse-check", "--out", hdr_out,
+             "--apply"])
+    check("CHANGED,P-1,2,2,'-OWNER: 'a' -> 'b'" in slurp(hdr_out),
+          "a column name that starts with - leads the detail cell and gets "
+          "an apostrophe  <-- pinned defect")
+    guard_report = Report()
+    for i, lead in enumerate(FORMULA_LEADERS):
+        guard_report.entries.append(Entry(
+            CHANGED, lead + "key%d" % i, None, None, lead + "detail%d" % i))
+    guard_out = os.path.join(tmp, "guard_out.csv")
+    write_classified(guard_out, guard_report)
+    with open(guard_out, newline="", encoding="utf-8") as handle:
+        guarded = list(csv.DictReader(handle))
+    check([r["key"] for r in guarded]
+          == ["'" + lead + "key%d" % i
+              for i, lead in enumerate(FORMULA_LEADERS)],
+          "every leader (= + - @ tab and CR) gets an apostrophe in the key "
+          "column  <-- pinned defect")
+    check([r["detail"] for r in guarded]
+          == ["'" + lead + "detail%d" % i
+              for i, lead in enumerate(FORMULA_LEADERS)],
+          "every leader (= + - @ tab and CR) gets an apostrophe in the "
+          "detail column  <-- pinned defect")
+    check(len(FORMULA_LEADERS) == 6 and chr(9) in FORMULA_LEADERS
+          and chr(13) in FORMULA_LEADERS,
+          "the guard covers six leaders, tab and CR among them")
+    check(cell("Hydrants") == "Hydrants" and cell("") == ""
+          and cell("a=b") == "a=b" and cell("'=x") == "'=x",
+          "a cell that does not start with a leader is written as it came")
+    neg_old = put("neg_old.csv", "PARCEL,OWNER\n-5,a\n+7,a\n")
+    neg_out = os.path.join(tmp, "neg_out.csv")
+    run_cli([neg_old, neg_old, "--skip-reuse-check", "--out", neg_out,
+             "--apply"])
+    with open(neg_out, newline="", encoding="utf-8") as handle:
+        negated = list(csv.DictReader(handle))
+    check([(r["class"], r["key"], r["old_line"], r["new_line"])
+           for r in negated]
+          == [(UNCHANGED, "'+7", "3", "3"), (UNCHANGED, "'-5", "2", "2")],
+          "the class and the two line columns stay plain, and a negative "
+          "number as a key is guarded like any text")
+    check(read_csv(neg_out)[0][0]["key"] == "'+7",
+          "the tool does not read its own --out back, so read_csv keeps the "
+          "apostrophe and no strip exists to pin")
     hl_old = put("hl_old.csv", OLD_CSV)
     hl_new = put("hl_new.csv", NEW_CSV)
     hl_alias = os.path.join(tmp, "hl_alias.csv")
