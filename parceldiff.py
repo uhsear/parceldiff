@@ -156,7 +156,6 @@ class Report(object):
         self.units = DEFAULT_UNITS
         self.notes = []
         self.one_sided = []      # columns only one vintage has, not compared
-        self.nothing_to_compare = False  # a rename left no column to compare
 
     @property
     def refused(self):
@@ -388,10 +387,12 @@ def unverified_reasons(report):
                        "floor). A truncated export looks exactly like this"
                        % (max(report.old_keys, report.new_keys), report.pairs,
                           100.0 * report.kept(), 100.0 * report.min_overlap))
-    if report.nothing_to_compare:
-        reasons.append("the two vintages share no column to compare besides "
-                       "the key, so every pair would read as unchanged. A "
-                       "renamed column looks exactly like this")
+    if report.one_sided:
+        reasons.append("column(s) on one side only were not compared: %s. A "
+                       "renamed column looks exactly like this, and a changed "
+                       "value in it would go unseen. Fix the header, or name "
+                       "the shared columns with --compare-fields to accept "
+                       "the skip" % ", ".join(report.one_sided))
     if not report.checked and not report.skip_reuse:
         reasons.append("key reuse was not checked, because no coordinate or "
                        "area column was named. Name --x-field and --y-field, "
@@ -435,9 +436,6 @@ def verdict(report):
     if report.unmeasured:
         text += (" %d pair(s) could not be measured for key reuse."
                  % len(report.unmeasured))
-    if report.one_sided:
-        text += (" %d column(s) on one side only were not compared."
-                 % len(report.one_sided))
     if not report.checked:
         text += " Key reuse was not checked."
     return 0, text
@@ -581,16 +579,15 @@ def plan_fields(old_header, new_header, key_fields, x_field, y_field,
     return fields, only
 
 
-def note_columns(report, fields, only, has_xy):
+def note_columns(report, only):
     """Record the columns this run did not compare, on the report.
 
-    A column only one vintage has is not compared. When that leaves nothing
-    to compare (no shared column, no coordinates), every pair reads as
-    unchanged and the run must not call that clean. A layer with only a key
-    column has no `only` and is a plain key diff.
+    A column only one vintage has is not compared. A renamed column looks
+    exactly like that, and a changed value in it would read as unchanged, so
+    unverified_reasons() turns any such column into exit 4. Naming the
+    shared columns with --compare-fields leaves `only` empty and accepts it.
     """
     report.one_sided = list(only)
-    report.nothing_to_compare = bool(only) and not fields and not has_xy
     if only:
         report.notes.append("columns only one vintage has, not compared: %s"
                             % ", ".join(only))
@@ -1462,9 +1459,9 @@ def _self_test(tmp):
     code, out, _ = run_cli([old_path, put("new2.csv", NEW_CSV.replace(
         "PARCEL,X,Y,ACRES,OWNER,USE", "PARCEL,X,Y,ACRES,OWNER,ZONE")),
         "--key-field", "PARCEL", "--skip-reuse-check"])
-    check(code == 0 and "columns only one vintage has, not compared: USE, "
+    check(code == 4 and "columns only one vintage has, not compared: USE, "
           "ZONE" in out,
-          "a column only one vintage has is named, not skipped silently")
+          "a column only one vintage has is named, and the run exits 4")
 
     # ---- the refusals through the CLI
     dupe_new = put("dupe.csv", NEW_CSV + "P-1,999999,999999,1.00,Zed,RES\n")
@@ -1616,7 +1613,7 @@ def _self_test(tmp):
     drift_a = put("drift_a.csv", "PARCEL,OWNER\nA,x\nB,y\n")
     drift_b = put("drift_b.csv", "PARCEL,OWNER_NAME\nA,z\nB,w\n")
     code, out, _ = run_cli([drift_a, drift_b, "--skip-reuse-check"])
-    check(code == 4 and "share no column to compare" in out
+    check(code == 4 and "column(s) on one side only were not compared" in out
           and "VERDICT: clean" not in out
           and "columns only one vintage has, not compared: OWNER, "
               "OWNER_NAME" in out,
@@ -1625,10 +1622,14 @@ def _self_test(tmp):
     part_a = put("part_a.csv", "PARCEL,OWNER,USE\nA,x,r\nB,y,r\n")
     part_b = put("part_b.csv", "PARCEL,OWNER_NAME,USE\nA,z,r\nB,w,r\n")
     code, out, _ = run_cli([part_a, part_b, "--skip-reuse-check"])
-    check(code == 0 and "2 column(s) on one side only were not compared."
-          in out.splitlines()[-1],
-          "a partly renamed layer still runs, and the verdict counts the "
-          "columns it skipped  <-- pinned defect")
+    check(code == 4 and "VERDICT: clean" not in out
+          and "OWNER, OWNER_NAME" in out.splitlines()[-1],
+          "a partly renamed layer exits 4 and names the columns, not a clean "
+          "0 over changed owners  <-- pinned defect")
+    code, out, _ = run_cli([part_a, part_b, "--skip-reuse-check",
+                            "--compare-fields", "USE"])
+    check(code == 0 and "VERDICT: clean" in out,
+          "--compare-fields accepts the skipped columns and the run is clean")
     keys_only = put("keys_only.csv", "PARCEL\nA\nB\n")
     code, out, _ = run_cli([keys_only, keys_only, "--skip-reuse-check"])
     check(code == 0 and "VERDICT: clean. 0 changed" in out,
@@ -1637,9 +1638,15 @@ def _self_test(tmp):
     xy_b = put("xy_b.csv", "PARCEL,X,Y,OWNER_NAME\nA,1,1,x\nB,2,2,y\n")
     code, out, _ = run_cli([xy_a, xy_b, "--x-field", "X", "--y-field", "Y",
                             "--projected"])
+    check(code == 4 and "VERDICT: clean" not in out
+          and "OWNER, OWNER_NAME" in out.splitlines()[-1],
+          "a renamed column beside a coordinate pair exits 4, not a clean 0 "
+          "over changed owners  <-- pinned defect")
+    code, out, _ = run_cli([xy_a, xy_b, "--x-field", "X", "--y-field", "Y",
+                            "--projected", "--compare-fields", "X,Y"])
     check(code == 0 and "VERDICT: clean" in out,
-          "a renamed column beside a coordinate pair still compares the "
-          "geometry")
+          "naming the shared columns beside a coordinate pair compares the "
+          "geometry and accepts the rename")
 
     # ---- what a clean exit does not cover (each is a README limit)
     def raw_put(name, data):
@@ -1661,6 +1668,18 @@ def _self_test(tmp):
     code, out, _ = run_cli([cut, full, "--skip-reuse-check"])
     check(code == 4 and "only 10 are on both sides" in out,
           "the same truncation on the old side exits 4 too")
+    thin_old = put("thin_old.csv", "PARCEL,X,Y\n" + "".join(
+        "%s,%d,1000\n" % (k, 1000 + n) for n, k in enumerate(keys)))
+    thin_new = put("thin_new.csv", "PARCEL,X,Y\nK0,500000,1000\n" + "".join(
+        "%s,%d,1000\n" % (k, 1000 + n) for n, k in enumerate(keys[1:10], 1)))
+    thin_out = os.path.join(tmp, "thin_out.csv")
+    code, out, _ = run_cli([thin_old, thin_new, "--x-field", "X", "--y-field",
+                            "Y", "--projected", "--out", thin_out, "--apply"])
+    check(code == 1 and not os.path.exists(thin_out)
+          and "Unverified. %s was not written" % thin_out in out
+          and "wrote " not in out,
+          "a reissued key on a truncated vintage exits 1 and writes no file "
+          " <-- pinned defect")
     code, out, _ = run_cli([full, cut, "--skip-reuse-check",
                             "--min-overlap", "0"])
     check(code == 0 and "0 changed, 0 added, 990 removed." in out,
@@ -2160,7 +2179,7 @@ def _run(argv):
     except ValueError as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 64
-    note_columns(report, fields, only, bool(args.x_field))
+    note_columns(report, only)
 
     # After compare, so a usage error leaves stdout empty rather than looking
     # like the start of a run that went well.

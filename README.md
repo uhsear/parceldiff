@@ -51,8 +51,13 @@ PASS  --ap is refused, not read as --apply, and writes nothing  <-- pinned defec
 ...
 PASS  degrees with one -9999 row are refused, not reported as a clean 'moved 1.8 ft'  <-- pinned defect
 PASS  a renamed only-attribute column exits 4, not a clean 0 over changed owners  <-- pinned defect
+PASS  a partly renamed layer exits 4 and names the columns, not a clean 0 over changed owners  <-- pinned defect
+...
+PASS  a renamed column beside a coordinate pair exits 4, not a clean 0 over changed owners  <-- pinned defect
 ...
 PASS  a new vintage that holds 10 of 1000 keys exits 4, not a clean 0  <-- pinned defect
+...
+PASS  a reissued key on a truncated vintage exits 1 and writes no file  <-- pinned defect
 ...
 PASS  cp1252 owners that differ in one accented letter are refused, not read as equal  <-- pinned defect
 ...
@@ -66,10 +71,10 @@ PASS  check() and raises() really do record a failure  <-- pinned defect
 PASS  the footer reports failures by count and by name, and exits 1  <-- pinned defect
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-241 assertions, 0 failed
+244 assertions, 0 failed
 ```
 
-The full run prints all 241 assertions. Each `...` line above is where this block is cut.
+The full run prints all 244 assertions. Each `...` line above is where this block is cut.
 
 ## What already exists
 
@@ -138,10 +143,10 @@ equivalent, and no more.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no
 database. Both vintages are CSVs, which is what every parcel layer can be exported as.
 
-The self-test prints the same 241 assertions on Windows (Python 3.13.2 and 3.9.25) and on Ubuntu
+The self-test prints the same 244 assertions on Windows (Python 3.13.2 and 3.9.25) and on Ubuntu
 (Python 3.12.3). The Windows 3.13.2 and Ubuntu 3.12.3 outputs have the same SHA-256, apart from the
 line endings that Windows adds. `coverage run --branch parceldiff.py --self-test` reports 100
-percent of statements and branches (1110 statements, 202 branches) on Windows and on Ubuntu.
+percent of statements and branches (1115 statements, 200 branches) on Windows and on Ubuntu.
 
 The key is compared as text and the geometry is read from columns. The tool measures a straight
 line between two centroids and converts nothing. Both vintages must already be in one projected
@@ -369,10 +374,12 @@ export cut off part way through looks like: 10 of 1,000 keys on one side is exit
 `--min-overlap` for both tests, and a run at exactly the floor passes. `--min-overlap 0` turns
 both off.
 
-A renamed column looks the same. When the two vintages share no column besides the key, and no
-coordinate pair is named, every pair would read as unchanged. The run exits 4 and the verdict says
-that no column was left to compare. When some columns are shared and some are on one side only,
-the run goes ahead, the report lists the columns it skipped, and the verdict counts them.
+A renamed column looks the same. When one vintage has a column the other lacks, such as `OWNER`
+in the old file and `OWNER_NAME` in the new one, the owner change is never compared and every pair
+would read as unchanged, even when other columns or a coordinate pair are shared. The run exits 4
+and the verdict names the columns. Fix the header, or pass `--compare-fields` with the shared
+columns to accept the skip. A layer that holds only the key column has nothing to skip and is a
+plain key diff.
 
 **Refusal 3: a reuse check that could not look.** The tool counts a pair as measured by a test
 only when both rows give a readable value to that test. The centroid test needs an X and a Y on
@@ -468,8 +475,10 @@ guard is the mitigation that [OWASP names for CSV injection](https://owasp.org/w
 
 A run that exits 3 or 4 writes nothing, even with `--apply`, because a file of classes looks like
 a diff that can be trusted. It prints `Refused. ... was not written` for exit 3 and `Unverified.
-... was not written` for exit 4. A run that exits 1 writes the file, because a reissued key is a
-finding and the file lists it.
+... was not written` for exit 4. A run that exits 1 writes the file only when no exit-4 reason
+also applies. A reissued key on a truncated vintage exits 1, because the key is a finding, but it
+prints `Unverified. ... was not written`, because the classes of a truncated diff cannot be
+trusted.
 
 ## Exit codes
 
@@ -479,7 +488,7 @@ finding and the file lists it.
 | 1 | At least one key now names a different parcel. Do not pair these rows. |
 | 2 | A file could not be read (a file that is not UTF-8 counts), or `--out` could not be written. |
 | 3 | Refused. A key is on more than one row, or a row has no key, so nothing was compared. |
-| 4 | The run could not be trusted. No key is on both sides, too few are on both sides of either vintage, no column was left to compare after a rename, a requested reuse test measured too few pairs, or no reuse test was asked for. |
+| 4 | The run could not be trusted. No key is on both sides, too few are on both sides of either vintage, a column on one side only, as a rename leaves, a requested reuse test measured too few pairs, or no reuse test was asked for. |
 | 64 | Usage error, including a column that is not in the CSV, a repeated column name, an unknown or abbreviated flag, an output path that is an input, and coordinates that look like degrees. |
 | 70 | An unexpected crash. This is a fault in the tool and not a finding. The traceback is on stderr. |
 
@@ -587,7 +596,30 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
   compared column that holds long text prints the whole cell on both sides of every `CHANGED`
   line, and in `--out`. Leave such a column out with `--compare-fields`.
 - Non-ASCII digit characters, such as Arabic-Indic digits, are also read as numbers, so `123` and
-  its Arabic-Indic form compare as equal and read as a valid coordinate.
+  its Arabic-Indic form compare as equal and read as a valid coordinate. A cell with underscores,
+  such as `1_000`, also compares equal to `1000`.
+- The formula guard covers only the six leaders = + - @ tab and carriage return. Line feed, the
+  full-width forms of = + - @, and a leading space are not guarded.
+- Leading tab and carriage return in a key are stripped on read, so the tab and CR guard matters
+  only for a column name.
+- Do not use an `--out` file as an input vintage. Its key column carries the apostrophe guard, so
+  a key such as `'-5` does not pair with `-5`.
+- The CSV is UTF-8 without a BOM. Import it as UTF-8 in Excel, or non-ASCII owner names may show
+  wrongly when a person double-clicks the file.
+- A run that has a reissued key and cannot write `--out` exits 2, not 1, because the write failure
+  replaces the exit code. Read the printed `VERDICT` line as well.
+- `--self-test` exits 1 on a failed assertion, the same code a data run uses for a reissued key.
+  Do not run both under one exit-code mapping. A pipe closed early, as in `--self-test | head -2`,
+  ends in exit 70 with an OSError traceback.
+- An unquoted comma in one row shifts that row's cells, so a centroid or an area can be read from
+  the wrong column and a pair is counted as measured or unmeasured wrongly. Only the
+  `--min-measured` floor stops a run with many such rows. A single ragged row can give a wrong
+  shift.
+- A cell over 131,072 characters stops the run with `error: field larger than field limit
+  (131072)` and exit 2.
+- The Windows behaviours in this list (device names such as `CON`, alternate data streams and
+  extended-length paths) are observed on one machine and are not cited to Microsoft
+  documentation.
 - Trailing empty rows such as `,,,` from a spreadsheet export count as rows with no key, so the
   run exits 3 until the rows are deleted or `--allow-blank-keys` is passed. That is the safe
   direction, and the message names the flag.
