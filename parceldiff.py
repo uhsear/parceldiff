@@ -156,6 +156,7 @@ class Report(object):
         self.units = DEFAULT_UNITS
         self.notes = []
         self.one_sided = []      # columns only one vintage has, not compared
+        self.fields = ()         # attribute columns compared on each pair
 
     @property
     def refused(self):
@@ -320,6 +321,7 @@ def compare(old, new, fields=(), reuse_distance=DEFAULT_REUSE_DISTANCE,
     report.check_xy = check_xy
     report.check_area = check_area
     report.units = units
+    report.fields = tuple(fields)
 
     sides = (("old", old), ("new", new))
     indexed = dict((name, index_rows(rows)) for name, rows in sides)
@@ -393,6 +395,12 @@ def unverified_reasons(report):
                        "value in it would go unseen. Fix the header, or name "
                        "the shared columns with --compare-fields to accept "
                        "the skip" % ", ".join(report.one_sided))
+    if not report.fields and not report.check_xy:
+        reasons.append("no column was compared, because every column both "
+                       "vintages share is the key or a coordinate. A key-only "
+                       "export looks exactly like this, and a changed value "
+                       "would go unseen. Export the attribute columns, or "
+                       "name --x-field and --y-field")
     if not report.checked and not report.skip_reuse:
         reasons.append("key reuse was not checked, because no coordinate or "
                        "area column was named. Name --x-field and --y-field, "
@@ -1041,8 +1049,8 @@ def _self_test(tmp):
     check(any("and 1 more row(s)" in line for line in
               describe(compare(many_blank, vintage(mk("A"))), sample=2)),
           "a long list of blank rows is cut at the sample and says so")
-    report = compare(blank_old, vintage(mk("A")), allow_blank=True,
-                     skip_reuse=True)
+    report = compare(blank_old, vintage(mk("A")), ("OWNER",),
+                     allow_blank=True, skip_reuse=True)
     check(not report.refused and report.counts()[UNKEYED] == 1
           and report.counts()[UNCHANGED] == 1 and gate(report) == 0,
           "with --allow-blank-keys the blank row is counted, not dropped")
@@ -1145,7 +1153,7 @@ def _self_test(tmp):
           "an empty new vintage compared nothing")
     old = vintage(mk("1"), mk("2"), mk("3"), mk("4"))
     new = vintage(mk("1"), mk("2"), mk("7"), mk("8"))
-    check(gate(compare(old, new, skip_reuse=True)) == 0,
+    check(gate(compare(old, new, ("OWNER",), skip_reuse=True)) == 0,
           "exactly the overlap floor passes, the floor is inclusive")
     report = compare(old, vintage(mk("1"), mk("7"), mk("8"), mk("9")))
     check(gate(report) == 4 and "25 percent of the keys are on both sides"
@@ -1153,7 +1161,7 @@ def _self_test(tmp):
           "a quarter of the keys on both sides is under the floor and "
           "exits 4  <-- pinned defect")
     check(gate(compare(old, vintage(mk("1"), mk("7"), mk("8"), mk("9")),
-                       min_overlap=0.0, skip_reuse=True)) == 0,
+                       ("OWNER",), min_overlap=0.0, skip_reuse=True)) == 0,
           "a floor of 0 turns the overlap check off")
 
     # ---- a run with no reuse check at all
@@ -1164,7 +1172,7 @@ def _self_test(tmp):
           describe(report)[-1],
           "a diff with no coordinate and no area column exits 4, not a "
           "clean 0  <-- pinned defect")
-    report = compare(plain_old, plain_new, skip_reuse=True)
+    report = compare(plain_old, plain_new, ("OWNER",), skip_reuse=True)
     check(gate(report) == 0 and describe(report)[-1].endswith(
         "Key reuse was not checked."),
           "--skip-reuse-check accepts a plain diff and says so")
@@ -1184,7 +1192,7 @@ def _self_test(tmp):
           and "measured no pair" in describe(report)[-1],
           "coordinates asked for and none readable exits 4, not a clean 0"
           "  <-- pinned defect")
-    check(gate(compare(old, new, skip_reuse=True)) == 0,
+    check(gate(compare(old, new, ("OWNER",), skip_reuse=True)) == 0,
           "the same rows with --skip-reuse-check are not UNVERIFIED")
     both_reasons = compare(
         vintage(mk("a"), mk("b"), mk("c"), mk("d")),
@@ -1234,7 +1242,8 @@ def _self_test(tmp):
           "percent floor" in describe(report)[-1],
           "seven readable areas in ten is under the floor and exits 4"
           "  <-- pinned defect")
-    report = compare(areas(10, 9), areas(10, 9), check_area=True)
+    report = compare(areas(10, 9), areas(10, 9), ("OWNER",),
+                     check_area=True)
     check(gate(report) == 0 and report.measured_area == 9
           and report.unmeasured == [("K9", "area")],
           "nine readable areas in ten is exactly the floor and passes")
@@ -1655,8 +1664,20 @@ def _self_test(tmp):
           "--compare-fields accepts the skipped columns and the run is clean")
     keys_only = put("keys_only.csv", "PARCEL\nA\nB\n")
     code, out, _ = run_cli([keys_only, keys_only, "--skip-reuse-check"])
-    check(code == 0 and "VERDICT: clean. 0 changed" in out,
-          "a layer of keys alone is a plain key diff, not a renamed column")
+    check(code == 4 and "VERDICT: clean" not in out
+          and "no column was compared" in out.splitlines()[-1],
+          "a layer of keys alone compared nothing and exits 4, not a clean "
+          "0  <-- pinned defect")
+    code, out, _ = run_cli([keys_only, keys_only, "--skip-reuse-check",
+                            "--compare-fields", "PARCEL"])
+    check(code == 0 and "VERDICT: clean" in out,
+          "naming the key itself in --compare-fields accepts a key-only diff")
+    xy_keys = put("xy_keys.csv", "PARCEL,X,Y\nA,1,1\nB,2,2\n")
+    code, out, _ = run_cli([xy_keys, xy_keys, "--x-field", "X", "--y-field",
+                            "Y", "--projected"])
+    check(code == 0 and "VERDICT: clean" in out,
+          "a key and coordinates only still compares the centroid, so it is "
+          "not refused")
     xy_a = put("xy_a.csv", "PARCEL,X,Y,OWNER\nA,1,1,x\nB,2,2,y\n")
     xy_b = put("xy_b.csv", "PARCEL,X,Y,OWNER_NAME\nA,1,1,x\nB,2,2,y\n")
     code, out, _ = run_cli([xy_a, xy_b, "--x-field", "X", "--y-field", "Y",

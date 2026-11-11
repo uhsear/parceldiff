@@ -55,6 +55,8 @@ PASS  degrees with one -9999 row are refused, not reported as a clean 'moved 1.8
 PASS  a renamed only-attribute column exits 4, not a clean 0 over changed owners  <-- pinned defect
 PASS  a partly renamed layer exits 4 and names the columns, not a clean 0 over changed owners  <-- pinned defect
 ...
+PASS  a layer of keys alone compared nothing and exits 4, not a clean 0  <-- pinned defect
+...
 PASS  a renamed column beside a coordinate pair exits 4, not a clean 0 over changed owners  <-- pinned defect
 ...
 PASS  a new vintage that holds 10 of 1000 keys exits 4, not a clean 0  <-- pinned defect
@@ -73,10 +75,10 @@ PASS  check() and raises() really do record a failure  <-- pinned defect
 PASS  the footer reports failures by count and by name, and exits 1  <-- pinned defect
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-244 assertions, 0 failed
+246 assertions, 0 failed
 ```
 
-The full run prints all 244 assertions. Each `...` line above is where this block is cut.
+The full run prints all 246 assertions. Each `...` line above is where this block is cut.
 
 ## What already exists
 
@@ -131,8 +133,10 @@ The diff itself is a solved problem. These tools did most of the work before thi
   So it compares a repeated key, where this tool refuses one, and I found no test for a unique key
   that was reissued. I read that page on 2026-10-24 and did not run the library.
 
-I read the three documentation pages on 2026-10-23. I did not run either ArcGIS or QGIS tool, so
-what this README says about them comes from their documentation and nothing more.
+I read four documentation pages: Feature Compare, Detect Feature Changes, the QGIS Detect dataset
+changes page (all on 2026-10-23) and the datacompy page above (2026-10-24). I did not run any of
+the three ArcGIS or QGIS tools, so what this README says about them comes from their documentation
+and nothing more.
 
 `gh search repos parceldiff` on 2026-10-22, before the first push, returned no repository with
 that name. On 2026-10-24 the same search returns only this repository, and
@@ -145,10 +149,10 @@ equivalent, and no more.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no
 database. Both vintages are CSVs, which is what every parcel layer can be exported as.
 
-The self-test prints the same 244 assertions on Windows (Python 3.13.2) and on Ubuntu
-(Python 3.12.3). The Windows 3.13.2 and Ubuntu 3.12.3 outputs have the same SHA-256, apart from the
+The self-test prints the same 246 assertions on Windows (Python 3.13.2, 3.12.10 and 3.9.25) and on
+Ubuntu (Python 3.12.3). The Windows 3.13.2 and Ubuntu 3.12.3 outputs have the same SHA-256, apart from the
 line endings that Windows adds. `coverage run --branch parceldiff.py --self-test` reports 100
-percent of statements and branches (1122 statements, 202 branches) on Windows and on Ubuntu.
+percent of statements and branches (1131 statements, 204 branches) on Windows and on Ubuntu.
 
 The key is compared as text and the geometry is read from columns. The tool measures a straight
 line between two centroids and converts nothing. Both vintages must already be in one projected
@@ -202,7 +206,8 @@ Every flag must be spelled in full. The parser sets `allow_abbrev=False`, so `--
 with exit 64 instead of being read as `--apply`, `--appl` is refused too, and `--key` is refused
 instead of being read as `--key-field`. The self-test pins all three.
 
-`--out` must name a new file. A path that is also an input vintage is refused with exit 64, on a
+`--out` must not be an input vintage, and an existing file at `--out` is replaced. A path that is
+an input vintage is refused with exit 64, on a
 dry run too. Without that check `--apply` would replace a source vintage with its own
 classification. The check compares real paths and nothing else. See Limits.
 
@@ -380,8 +385,9 @@ A renamed column looks the same. When one vintage has a column the other lacks, 
 in the old file and `OWNER_NAME` in the new one, the owner change is never compared and every pair
 would read as unchanged, even when other columns or a coordinate pair are shared. The run exits 4
 and the verdict names the columns. Fix the header, or pass `--compare-fields` with the shared
-columns to accept the skip. A layer that holds only the key column has nothing to skip and is a
-plain key diff.
+columns to accept the skip. A layer whose shared columns are all the key or a coordinate has nothing to compare, so a run
+with no `--x-field` exits 4 and says so, because a changed value in a column that was never
+exported would read as clean. Naming the key in `--compare-fields` accepts a key-only diff.
 
 **Refusal 3: a reuse check that could not look.** The tool counts a pair as measured by a test
 only when both rows give a readable value to that test. The centroid test needs an X and a Y on
@@ -493,7 +499,7 @@ trusted.
 | 1 | At least one key now names a different parcel. Do not pair these rows. |
 | 2 | A file could not be read (a file that is not UTF-8 counts), or `--out` could not be written. |
 | 3 | Refused. A key is on more than one row, or a row has no key, so nothing was compared. |
-| 4 | The run could not be trusted. No key is on both sides, too few are on both sides of either vintage, a column on one side only, as a rename leaves, a requested reuse test measured too few pairs, or no reuse test was asked for. |
+| 4 | The run could not be trusted. No key is on both sides, too few are on both sides of either vintage, a column on one side only, as a rename leaves, no column to compare, a requested reuse test measured too few pairs, or no reuse test was asked for. |
 | 64 | Usage error, including a column that is not in the CSV, a repeated column name, an unknown or abbreviated flag, an output path that is an input, and coordinates that look like degrees. |
 | 70 | An unexpected crash. This is a fault in the tool and not a finding. The traceback is on stderr. |
 
@@ -616,9 +622,14 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
 - `--self-test` exits 1 on a failed assertion, the same code a data run uses for a reissued key.
   Do not run both under one exit-code mapping. A pipe closed early, as in `--self-test | head -2`,
   ends in exit 70 with an OSError traceback.
-- The Windows behaviours in this list (device names such as `CON`, alternate data streams and
-  extended-length paths) were observed on one machine and are not cited to Microsoft
-  documentation. Treat them as observed, not documented.
+- The Windows path behaviours listed here (device names such as `CON`, alternate data streams and
+  extended-length paths) were observed on one machine. Microsoft's
+  [Naming Files, Paths, and Namespaces](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file)
+  page covers reserved device names, but I did not check the other two against it.
+- A key that already starts with an apostrophe is written unchanged, so `'=1` and `=1` look the
+  same in `--out`.
+- The self-test was run on Python 3.9.25, 3.12.10 and 3.13.2 on Windows and on 3.12.3 on Ubuntu.
+  Every run printed the same 246 assertions. Python 3.9 is the lowest version I tested.
 - Trailing empty rows such as `,,,` from a spreadsheet export count as rows with no key, so the
   run exits 3 until the rows are deleted or `--allow-blank-keys` is passed. That is the safe
   direction, and the message names the flag.
