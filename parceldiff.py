@@ -398,14 +398,16 @@ def unverified_reasons(report):
                        "area column was named. Name --x-field and --y-field, "
                        "or --area-field, or pass --skip-reuse-check to accept "
                        "a plain diff")
-    for name, asked, got, noun in (
-            ("centroid", report.check_xy, report.measured_xy, "coordinate"),
-            ("area", report.check_area, report.measured_area, "area")):
+    for name, asked, got, cause in (
+            ("centroid", report.check_xy, report.measured_xy,
+             "coordinate was blank or unreadable"),
+            ("area", report.check_area, report.measured_area,
+             "area was blank, zero or unreadable")):
         if not (asked and report.pairs):
             continue
         if got == 0:
-            reasons.append("the %s test measured no pair, because every %s "
-                           "was blank, zero or unreadable" % (name, noun))
+            reasons.append("the %s test measured no pair, because every %s"
+                           % (name, cause))
         elif got / float(report.pairs) < report.min_measured:
             reasons.append("the %s test measured only %d of %d pair(s), under "
                            "the %.0f percent floor, so a reissued key among "
@@ -636,7 +638,12 @@ def read_csv(path):
     that differ by one accented letter read as equal. DictReader keeps the
     last of two columns with one name and drops the other without a word, so a
     repeated column name is refused here. The line is the one the record
-    starts on: a quoted newline and a blank line do not move it.
+    starts on: a quoted newline and a blank line do not move it. A row with
+    text beyond the last header cell is refused (csv.Error, exit 2): it is
+    what an unquoted comma looks like, and DictReader would park the cells
+    under a None key where extract_rows drops them, so a change in them would
+    read as UNCHANGED. Extra cells that are all blank, from a trailing comma,
+    are harmless and pass.
     """
     try:
         return _read_rows(path)
@@ -662,6 +669,14 @@ def _read_rows(path):
             record = _Record(raw)
             record.line = reader.line_num - sum(
                 _breaks(v) for v in raw.values())
+            extra = [c for c in raw.get(None, ()) if c.strip()]
+            if extra:
+                raise csv.Error(
+                    "%s line %d has %d more cell(s) than the header, with "
+                    "text in them. An unquoted comma shifted the cells, and "
+                    "a changed value may sit in the extra ones. Quote the "
+                    "field that holds the comma, or fix the export."
+                    % (path, record.line, len(raw[None])))
             rows.append(record)
         return rows, header
 
@@ -1374,22 +1389,30 @@ def _self_test(tmp):
     check([r.line for r in raw] == [2, 4, 6],
           "a blank line and a quoted newline do not move the line a record "
           "starts on  <-- pinned defect")
-    path = put("short.csv", "K,V\n1\n2,b,extra,more\n")
+    path = put("short.csv", "K,V\n1\n2,b,,\n")
     raw, header = read_csv(path)
     rows = extract_rows(raw, ["K"], None, None, None)
     check(rows[0].values == {"K": "1", "V": ""}
           and rows[1].values == {"K": "2", "V": "b"},
-          "a short row reads as blank and a long row loses its extras")
-    path = put("ragged.csv", "PARCEL,ADDR,X,Y\nA,1 Main St, Apt 2,620100,"
-                             "1580200\n")
-    raw, header = read_csv(path)
-    rows = extract_rows(raw, ["PARCEL"], "X", "Y", None)
-    check(rows[0].x is None and rows[0].y == 620100.0,
-          "an unquoted comma in an address shifts the cells, so Y reads "
-          "the X value")
-    path = put("extra.csv", "K,V\n2,b,\"x\ny\"\n3,c\n")
-    check([r.line for r in read_csv(path)[0]] == [2, 4],
-          "a quoted newline in an extra cell does not move the line either")
+          "a short row reads as blank and blank extra cells from a trailing "
+          "comma pass")
+    message = ""
+    try:
+        read_csv(put("ragged2.csv", "K,V\n1,a\n2,b,\"x\ny\"\n"))
+    except csv.Error as exc:
+        message = str(exc)
+    check("line 3 has 1 more cell(s)" in message
+          and "Quote the field" in message,
+          "the refusal names the line, even past a quoted newline, and "
+          "says what to do")
+    old_path = put("rag_old.csv", "P,OWNER,USE\nP-1,Ames, Bob,RES\n")
+    new_path = put("rag_new.csv", "P,OWNER,USE\nP-1,Ames, Bob,COM\n")
+    code, out, err = run_cli([old_path, new_path, "--key-field", "P",
+                              "--skip-reuse-check"])
+    check(code == 2 and "more cell(s) than the header" in err
+          and "VERDICT" not in out,
+          "an unquoted comma that hides a USE change exits 2, not a false "
+          "clean 0  <-- pinned defect")
     raises(lambda: read_csv(put("dup.csv", "K,V,V\n1,a,b\n")),
            "a repeated column name is refused, the CSV reader would keep "
            "the last and drop the first  <-- pinned defect")

@@ -47,6 +47,8 @@ PASS  a diff with no coordinate and no area column exits 4, not a clean 0  <-- p
 PASS  an area column that is blank on every row exits 4, not a clean 0  <-- pinned defect
 PASS  one readable pair in fifty exits 4, not a clean 0  <-- pinned defect
 ...
+PASS  an unquoted comma that hides a USE change exits 2, not a false clean 0  <-- pinned defect
+...
 PASS  --ap is refused, not read as --apply, and writes nothing  <-- pinned defect
 ...
 PASS  degrees with one -9999 row are refused, not reported as a clean 'moved 1.8 ft'  <-- pinned defect
@@ -90,8 +92,8 @@ The diff itself is a solved problem. These tools did most of the work before thi
   vintages below, the same merge reported `P-3` and `P-4` as `both` and raised no warning, though
   the two rows are different parcels.
 - **ArcGIS Pro, Feature Compare.** It "compares two feature classes or layers and returns the
-  comparison results", with compare types for geometry, attributes, schema and spatial reference,
-  at Basic, Standard and Advanced licence
+  comparison results", with compare types for geometry, attributes, schema and spatial reference.
+  The tool is available at Basic, Standard and Advanced licence
   ([Feature Compare](https://doc.esri.com/en/arcgis-pro/latest/tool-reference/data-management/feature-compare.html)).
   It lines the rows up by a sort field: "Sorting by a common field in both inputs ensures that you
   are comparing the same row from each input dataset." The page does not say that the sort field
@@ -143,10 +145,10 @@ equivalent, and no more.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no
 database. Both vintages are CSVs, which is what every parcel layer can be exported as.
 
-The self-test prints the same 244 assertions on Windows (Python 3.13.2 and 3.9.25) and on Ubuntu
+The self-test prints the same 244 assertions on Windows (Python 3.13.2) and on Ubuntu
 (Python 3.12.3). The Windows 3.13.2 and Ubuntu 3.12.3 outputs have the same SHA-256, apart from the
 line endings that Windows adds. `coverage run --branch parceldiff.py --self-test` reports 100
-percent of statements and branches (1115 statements, 200 branches) on Windows and on Ubuntu.
+percent of statements and branches (1122 statements, 202 branches) on Windows and on Ubuntu.
 
 The key is compared as text and the geometry is read from columns. The tool measures a straight
 line between two centroids and converts nothing. Both vintages must already be in one projected
@@ -399,7 +401,7 @@ pairs the key-reuse check could not measure:
   A (centroid test)
   B (centroid test)
 
-VERDICT: UNVERIFIED, the centroid test measured no pair, because every coordinate was blank, zero or unreadable.
+VERDICT: UNVERIFIED, the centroid test measured no pair, because every coordinate was blank or unreadable.
 ```
 
 A test that measured only a few pairs is not much better, because a reissued key among the rest
@@ -471,7 +473,10 @@ The tool does not read its own `--out` back as a vintage, so it has no code that
 apostrophe. Strip one leading apostrophe yourself if another program reads the file. The self-test
 writes all six leaders to both text columns through `write_classified`, and a key and a column
 name through the command line. It breaks (6 assertions fail) when the guard is switched off. The
-guard is the mitigation that [OWASP names for CSV injection](https://owasp.org/www-community/attacks/CSV_Injection).
+guard is the single-quote prefix that [OWASP lists for CSV injection](https://owasp.org/www-community/attacks/CSV_Injection).
+OWASP also says that prefix is not reliable in Excel after a person saves and reopens the file,
+and names a tab prefix inside a quoted field as the Excel-resistant form. I did not check how
+Excel shows either one.
 
 A run that exits 3 or 4 writes nothing, even with `--apply`, because a file of classes looks like
 a diff that can be trusted. It prints `Refused. ... was not written` for exit 3 and `Unverified.
@@ -521,7 +526,7 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
   `REUSED` and exit 1, with no word about the CRS.
 - A number is compared as an exact decimal, so `007` and `7` agree, `1e3` and `1000` agree, and
   `1_000` and `1000` agree. A ZIP or id column that lost its leading zeros, or was rewritten in
-  exponent form, is not reported as an edit. A key is never compared as a number. Keys are trimmed
+  exponent form, is not reported as an edit, and the exit code stays 0. A key is never compared as a number. Keys are trimmed
   with `str.strip()` and nothing else. Zero-width spaces, NFC against NFD forms of one accented
   letter, and case differences do not pair, so the run reports ADDED and REMOVED, or exits 4 when
   nothing pairs. If the two vintages spell the key differently, fix that first with
@@ -546,12 +551,11 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
   2 on every Python version.
 - A character the console cannot show prints as `?` instead of stopping the run. The file the
   tool writes is always UTF-8.
-- A short row has its missing cells read as blank, and a long row has its extra cells ignored.
-  A repeated column name is refused, because a CSV reader keeps the last column of that name and
-  drops the other without a word. Two or more empty column names count as one repeated name. An
-  unquoted comma in an address shifts every later cell in that row, so X, Y and ACRES can be read
-  from the wrong cells. The row then gives a wrong `REUSED` verdict or an unmeasured pair, and
-  nothing flags the shift.
+- A short row has its missing cells read as blank, so a cell lost at the end of a row can hide a
+  change, and the exit code stays 0. A row with text in cells beyond the header, which is what an
+  unquoted comma in an address looks like, is refused with exit 2 and the line number. Extra
+  cells that are all blank, from a trailing comma, pass. A repeated column name is refused, because a CSV reader keeps the last column of that name and
+  drops the other without a word. Two or more empty column names count as one repeated name.
 - Keys and detail text print as they are. A quoted line break in a cell splits the report line in
   two, and a terminal escape sequence in a cell goes to the console unchanged. Review an untrusted
   CSV as text first.
@@ -563,7 +567,8 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
   exit code stays 0, because you asked for that.
 - It reads both files into memory. A run of 200,000 rows a side, with the centroid and area tests
   on, took about 7 seconds on one unloaded Windows workstation and about 14 seconds on a busy one.
-  Timing depends on the machine. I did not time it on the Ubuntu host.
+  Those are two measurements I remember, not a repeated benchmark, and I did not time it on the
+  Ubuntu host.
 - Output files are written in place, not through a temporary file. `--out` onto an existing file
   replaces it. A failed write can leave a partial file, and the exit code is 2.
 - The check that `--out` is not an input compares real paths and nothing else. A hard link to an
@@ -575,8 +580,9 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
   OWASP also lists a line feed and the full-width forms of `=`, `+`, `-` and `@`. The tool does not
   guard those, and a value that starts with a space is not changed. OWASP also warns that Excel
   may remove quotes or escape characters when a person saves the file again and opens it, which
-  can bring the formula back. The tool cannot prevent that. The OWASP page is cited under "The
-  output file".
+  can bring the formula back. OWASP names a tab prefix inside a quoted field as the form that
+  holds in Excel, and this tool uses the apostrophe. The tool cannot prevent a re-save. The OWASP
+  page is cited under "The output file".
 - When the reader closes the pipe early and the output is large, as in `parceldiff.py ...
   --sample 100000 | head -1` over a 20,000-row run, the print fails and the run ends with exit 70
   and a traceback. This happened on Windows and on Ubuntu. With the default `--sample` of 10,
@@ -592,14 +598,13 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
   the file.
 - The default `--move-tolerance`, the default `--sample` and the percent figures in messages are
   not pinned by an assertion.
-- A CSV cell over 131,072 characters, such as a WKT geometry, stops the run with exit 2. A
+- A CSV cell over 131,072 characters, such as a WKT geometry, stops the run with `error: field
+  larger than field limit (131072)` and exit 2. A
   compared column that holds long text prints the whole cell on both sides of every `CHANGED`
   line, and in `--out`. Leave such a column out with `--compare-fields`.
 - Non-ASCII digit characters, such as Arabic-Indic digits, are also read as numbers, so `123` and
   its Arabic-Indic form compare as equal and read as a valid coordinate. A cell with underscores,
   such as `1_000`, also compares equal to `1000`.
-- The formula guard covers only the six leaders = + - @ tab and carriage return. Line feed, the
-  full-width forms of = + - @, and a leading space are not guarded.
 - Leading tab and carriage return in a key are stripped on read, so the tab and CR guard matters
   only for a column name.
 - Do not use an `--out` file as an input vintage. Its key column carries the apostrophe guard, so
@@ -611,15 +616,9 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
 - `--self-test` exits 1 on a failed assertion, the same code a data run uses for a reissued key.
   Do not run both under one exit-code mapping. A pipe closed early, as in `--self-test | head -2`,
   ends in exit 70 with an OSError traceback.
-- An unquoted comma in one row shifts that row's cells, so a centroid or an area can be read from
-  the wrong column and a pair is counted as measured or unmeasured wrongly. Only the
-  `--min-measured` floor stops a run with many such rows. A single ragged row can give a wrong
-  shift.
-- A cell over 131,072 characters stops the run with `error: field larger than field limit
-  (131072)` and exit 2.
 - The Windows behaviours in this list (device names such as `CON`, alternate data streams and
-  extended-length paths) are observed on one machine and are not cited to Microsoft
-  documentation.
+  extended-length paths) were observed on one machine and are not cited to Microsoft
+  documentation. Treat them as observed, not documented.
 - Trailing empty rows such as `,,,` from a spreadsheet export count as rows with no key, so the
   run exits 3 until the rows are deleted or `--allow-blank-keys` is passed. That is the safe
   direction, and the message names the flag.
@@ -628,11 +627,15 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
   "lacks column(s)", not 2, so a job that maps 64 to "fix the command line" will misread a failed
   export. A semicolon- or tab-separated file exits 64 the same way and shows the whole header as
   one column name. Only comma-separated files are read.
-- Coordinates or areas near the float limits, such as `1e308`, give a `moved inf` line rather than
-  a number. The verdict is still right, but the figure means nothing.
+- Coordinates or areas near the float limit, such as `1e308`, give an enormous number or `inf` in
+  a `moved` line. The verdict is still right, but the figure means nothing.
 - On Windows, a device name such as `CON` or `NUL`, or an alternate data stream such as
   `x.csv:s`, is accepted as `--out`. The run prints `wrote <path>` and exits 0, but no real file
   appears, or an empty `x.csv` does.
+- `--x-field` and `--y-field` may name the same column. The shift is then computed from that one
+  column twice, with no warning.
+- A start-up failure before `main()` runs, such as an interpreter older than 3.9 that cannot
+  compile the file, exits 1. This tool also uses 1 for a reissued key.
 - Ctrl-C is not caught. An interrupted run ends with a Python traceback and the platform's
   interrupt status, not one of the codes above.
 - This tool writes a CSV, not a spreadsheet or a feature class, and has no rule for a single
