@@ -203,13 +203,24 @@ def key_label(key):
     return "|".join(key)
 
 
+PLAIN_NUMBER = re.compile(r"[+-]?(?:([0-9]+)(?:[.][0-9]*)?|[.][0-9]+)")
+
+
 def _exact_number(text):
-    """A finite Decimal, or None. Decimal keeps every digit; a float keeps 15."""
-    try:
-        value = decimal.Decimal(str(text))
-    except (TypeError, ValueError, ArithmeticError):
+    """A Decimal for a plain base-10 number, or None. A float keeps 15 digits.
+
+    Only an optional sign, ASCII digits and one point count. An exponent, an
+    underscore, a non-ASCII digit, nan and inf are text, and so is a whole
+    part with a leading zero: 07034 and 7034 are two ZIP codes.
+    """
+    trimmed = str(text).strip()
+    match = PLAIN_NUMBER.fullmatch(trimmed)
+    if match is None:
         return None
-    return value if value.is_finite() else None
+    whole = match.group(1)
+    if whole is not None and len(whole) > 1 and whole[0] == "0":
+        return None
+    return decimal.Decimal(trimmed)
 
 
 def same_value(a, b):
@@ -862,10 +873,19 @@ def _self_test(tmp):
     check(not same_value("1234567890123456789", "1234567890123456788"),
           "two 19-digit ids that differ in the last digit are two values"
           "  <-- pinned defect")
-    check(same_value("01234", "1234") and same_value("1e3", "1000")
-          and same_value("1_000", "1000"),
-          "leading zeros, an exponent and an underscore read as the same "
-          "number")
+    check(not same_value("07034", "7034") and not same_value("007", "7")
+          and not same_value("-007", "-7"),
+          "a ZIP that lost its leading zero is an edit, not a round trip"
+          "  <-- pinned defect")
+    check(not same_value("1e3", "1000") and not same_value("1_000", "1000"),
+          "an exponent form and an underscore are text, not the same number"
+          "  <-- pinned defect")
+    check(not same_value("123", "\u0661\u0662\u0663")
+          and same_value("0.50", "0.5") and same_value("-0", "0")
+          and same_value("+5", "5") and same_value(".5", "0.50")
+          and not same_value("00.5", "0.5"),
+          "a non-ASCII digit is text, and 0.50, .5 and +5 still agree"
+          "  <-- pinned defect")
     check(not same_value("nan", "NaN") and not same_value("inf", "Infinity")
           and not same_value("1e99999999999999999999", "1"),
           "nan, inf and an exponent too large to hold are never equal "
@@ -1468,11 +1488,31 @@ def _self_test(tmp):
           and "--skip-reuse-check" in out,
           "the same files with no geometry column and no flag exit 4, and "
           "the verdict names the flag  <-- pinned defect")
+    zip_old = put("zip_old.csv", "P,ZIP\nP-1,07034\n")
+    zip_new = put("zip_new.csv", "P,ZIP\nP-1,7034\n")
+    code, out, err = run_cli([zip_old, zip_new, "--key-field", "P",
+                              "--skip-reuse-check"])
+    check(code == 0 and "  CHANGED    1" in out and "ZIP: '07034' -> '7034'"
+          in out, "a ZIP that lost its leading zero is reported as CHANGED, "
+          "naming the change  <-- pinned defect")
     code, out, _ = run_cli(base + ["--reuse-distance", "800", "--area-ratio",
                                    "3", "--units", "m"])
     check("by centroid moved above 800.0 m or area ratio above 3.00" in out
           and "P-4  centroid moved 10065.8 m" in out,
           "the run prints the thresholds and the unit it used")
+    code, out, _ = run_cli(base + ["--move-tolerance", "0.1"])
+    check("(geometry): moved 0.4" in out,
+          "--move-tolerance 0.1 lists a 0.4 ft nudge that the default 1.0 "
+          "leaves alone")
+    code, out, _ = run_cli(base)
+    check("(geometry)" not in out,
+          "the default move tolerance leaves the 0.4 ft nudge alone")
+    code, out, _ = run_cli([put("apos_old.csv", "P\n-5\n"),
+                            put("apos_new.csv", "P\n'-5\n"),
+                            "--key-field", "P", "--skip-reuse-check"])
+    check(code == 4 and "  ADDED      1" in out and "  REMOVED    1" in out,
+          "a key '-5 does not pair with -5, so an --out file is not an "
+          "input vintage")
     code, out, _ = run_cli(base + ["--compare-fields", "USE"])
     check(code == 1 and "  CHANGED    0" not in out
           and "OWNER:" not in out,

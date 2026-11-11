@@ -36,6 +36,7 @@ parceldiff self-test: temporary files only, no network, no credentials
 PASS  a plain number and a padded number both read
 ...
 PASS  two 19-digit ids that differ in the last digit are two values  <-- pinned defect
+PASS  a ZIP that lost its leading zero is an edit, not a round trip  <-- pinned defect
 ...
 PASS  a key on two rows refuses the run and classifies nothing  <-- pinned defect
 ...
@@ -75,10 +76,10 @@ PASS  check() and raises() really do record a failure  <-- pinned defect
 PASS  the footer reports failures by count and by name, and exits 1  <-- pinned defect
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-246 assertions, 0 failed
+252 assertions, 0 failed
 ```
 
-The full run prints all 246 assertions. Each `...` line above is where this block is cut.
+The full run prints all 252 assertions. Each `...` line above is where this block is cut.
 
 ## What already exists
 
@@ -149,10 +150,15 @@ equivalent, and no more.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no
 database. Both vintages are CSVs, which is what every parcel layer can be exported as.
 
-The self-test prints the same 246 assertions on Windows (Python 3.13.2, 3.12.10 and 3.9.25) and on
-Ubuntu (Python 3.12.3). The Windows 3.13.2 and Ubuntu 3.12.3 outputs have the same SHA-256, apart from the
-line endings that Windows adds. `coverage run --branch parceldiff.py --self-test` reports 100
-percent of statements and branches (1131 statements, 204 branches) on Windows and on Ubuntu.
+The self-test prints the same 252 assertions on Windows (Python 3.13.2, 3.12.10 and 3.9.25) and on
+Ubuntu (Python 3.12.3). The raw SHA-256 of the two outputs differs, because Windows writes CRLF line
+endings and Ubuntu writes LF. After CRLF is converted to LF, the Windows 3.13.2 output and the
+Ubuntu 3.12.3 output have the same SHA-256, `2d2a485cc3fab7d54333285ba3667285524b230f8802ab53c5b322288bd1ad6e`
+(the raw Windows value was `435deb17bedc705669aef253123f0680ead8c28a3c4478d6374a319e26ad1729`).
+`coverage run --branch parceldiff.py --self-test` reports 100 percent of statements and branches
+(1147 statements, 208 branches) on Windows and on Ubuntu. Ubuntu has no `coverage` package
+installed, so I copied the pure-Python `coverage` 7.16.1 package from the Windows virtual
+environment into the scratch folder and ran it with `COVERAGE_CORE=pytrace PYTHONPATH=.`.
 
 The key is compared as text and the geometry is read from columns. The tool measures a straight
 line between two centroids and converts nothing. Both vintages must already be in one projected
@@ -231,7 +237,10 @@ count as `CHANGED`, and its column differences are not reported, because the two
 different parcels.
 
 A number is compared as an exact decimal, so `1` and `1.0` agree and a spreadsheet round trip is
-not an edit. Two ids that differ in any digit, including the nineteenth, are two values. Text
+not an edit. Two ids that differ in any digit, including the nineteenth, are two values. A cell
+counts as a number only when it is an optional sign, ASCII digits and one point. A whole part
+with a leading zero is text, so a ZIP that changed from `07034` to `7034` is reported as
+`CHANGED`. An exponent (`1e3`), an underscore (`1_000`) and a non-ASCII digit are text too. Text
 compares exactly after trimming. A key is always text, never a number.
 
 The demo vintages are two small tables. `old.csv` has six parcels and `new.csv` has six.
@@ -495,7 +504,7 @@ trusted.
 
 | Code | Meaning |
 |---|---|
-| 0 | A diff was produced, the reuse check ran on enough pairs, and no key was reissued. Changes, additions and removals do not fail the gate. With `--skip-reuse-check` the reuse check did not run, and the verdict says so. |
+| 0 | A diff was produced, the reuse check ran on enough pairs, and no key was reissued. Changes, additions and removals do not fail the gate. With `--skip-reuse-check` the reuse check did not run, and with `--allow-blank-keys` the keyless rows were left out of the diff. The verdict says so in both cases. |
 | 1 | At least one key now names a different parcel. Do not pair these rows. |
 | 2 | A file could not be read (a file that is not UTF-8 counts), or `--out` could not be written. |
 | 3 | Refused. A key is on more than one row, or a row has no key, so nothing was compared. |
@@ -530,9 +539,10 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
   degrees check guards against the commonest mistake. It does not prove that the CRS is right.
   A CRS mismatch is not named: one vintage in feet and the other in metres shows as every key
   `REUSED` and exit 1, with no word about the CRS.
-- A number is compared as an exact decimal, so `007` and `7` agree, `1e3` and `1000` agree, and
-  `1_000` and `1000` agree. A ZIP or id column that lost its leading zeros, or was rewritten in
-  exponent form, is not reported as an edit, and the exit code stays 0. A key is never compared as a number. Keys are trimmed
+- A changed attribute does not fail the gate: `CHANGED` rows exit 0. A ZIP or id column that lost
+  its leading zeros, as `07034` to `7034`, or was rewritten in exponent form, is listed as
+  `CHANGED` with both values. Read the `CHANGED` list, because the exit code stays 0. A value
+  such as `+5`, `.5` or `0.50` still agrees with `5` and `0.5`. A key is never compared as a number. Keys are trimmed
   with `str.strip()` and nothing else. Zero-width spaces, NFC against NFD forms of one accented
   letter, and case differences do not pair, so the run reports ADDED and REMOVED, or exits 4 when
   nothing pairs. If the two vintages spell the key differently, fix that first with
@@ -557,14 +567,16 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
   2 on every Python version.
 - A character the console cannot show prints as `?` instead of stopping the run. The file the
   tool writes is always UTF-8.
-- A short row has its missing cells read as blank, so a cell lost at the end of a row can hide a
-  change, and the exit code stays 0. A row with text in cells beyond the header, which is what an
+- A short row has its missing cells read as blank. A lost attribute cell then shows as `CHANGED`.
+  A lost X, Y or area value is not measured, so it can hide a key-reuse pair, and the exit code
+  can stay 0. A row with text in cells beyond the header, which is what an
   unquoted comma in an address looks like, is refused with exit 2 and the line number. Extra
   cells that are all blank, from a trailing comma, pass. A repeated column name is refused, because a CSV reader keeps the last column of that name and
   drops the other without a word. Two or more empty column names count as one repeated name.
 - Keys and detail text print as they are. A quoted line break in a cell splits the report line in
-  two, and a terminal escape sequence in a cell goes to the console unchanged. Review an untrusted
-  CSV as text first.
+  two, and a terminal escape sequence in a cell goes to the console unchanged. Only the `--out`
+  CSV is guarded. The console report is not sanitised, so a key that holds ANSI escape bytes can
+  redraw or retitle the console of whoever reads it. Review an untrusted CSV as text first.
 - A new vintage that keeps a smaller share of the old keys than `--min-overlap` exits 4. A vintage
   that keeps more than that, such as 600 of 1,000 keys, exits 0 and lists the rest as `REMOVED`,
   because removals do not fail the gate. Read the `REMOVED` count yourself. A new vintage that is
@@ -572,45 +584,50 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
 - `--allow-blank-keys` leaves the keyless rows out of the diff. The verdict counts them, but the
   exit code stays 0, because you asked for that.
 - It reads both files into memory. A run of 200,000 rows a side, with the centroid and area tests
-  on, took about 7 seconds on one unloaded Windows workstation and about 14 seconds on a busy one.
-  Those are two measurements I remember, not a repeated benchmark, and I did not time it on the
-  Ubuntu host.
+  on, took 7.9, 8.2 and 8.6 seconds on one Windows workstation (Python 3.13.2) and 4.9 seconds on
+  the Ubuntu host (Python 3.12.3). The input was synthetic, with 4,000 changed owners. These are
+  single runs on one machine each, not a benchmark.
 - Output files are written in place, not through a temporary file. `--out` onto an existing file
   replaces it. A failed write can leave a partial file, and the exit code is 2.
 - The check that `--out` is not an input compares real paths and nothing else. A hard link to an
   input passes it, and `--apply` then overwrites the input through the link. The self-test shows
   that with a hard link. On Windows, an extended-length path such as `//?/C:/path/old.csv` passed
   the same check when I tried it by hand. The self-test does not cover that form, because it only
-  applies to Windows.
+  applies to Windows. A mapped network drive that points at an input was not tested, so the check
+  may miss that alias too.
 - The formula guard covers the first character only: `=`, `+`, `-`, `@`, tab and carriage return.
   OWASP also lists a line feed and the full-width forms of `=`, `+`, `-` and `@`. The tool does not
   guard those, and a value that starts with a space is not changed. OWASP also warns that Excel
   may remove quotes or escape characters when a person saves the file again and opens it, which
-  can bring the formula back. OWASP names a tab prefix inside a quoted field as the form that
+  can bring the formula back. Only the six listed leading characters are guarded, so a zero-width
+  space before an `=` is written as it is. OWASP names a tab prefix inside a quoted field as the form that
   holds in Excel, and this tool uses the apostrophe. The tool cannot prevent a re-save. The OWASP
   page is cited under "The output file".
 - When the reader closes the pipe early and the output is large, as in `parceldiff.py ...
   --sample 100000 | head -1` over a 20,000-row run, the print fails and the run ends with exit 70
-  and a traceback. This happened on Windows and on Ubuntu. With the default `--sample` of 10,
+  and a traceback. This happened on Windows and on Ubuntu, and the Windows status can be 120 as in
+  the `--self-test` bullet below. With the default `--sample` of 10,
   `| head -1` ends with the verdict's exit code and no traceback.
 - `--self-test` ignores every other valid flag. It writes only to a temporary directory under the
   system temp path, which it removes at the end, even when an assertion raises. It creates one
   hard link there.
 - It opens no socket and imports no network module. There is no network path to test, and no
   credential anywhere in it to leak.
+- A dry run does not test that `--out` is writable. A dry run with `--out` in a directory that
+  does not exist prints the check-only line and exits 0, and the same command with `--apply`
+  exits 2 with `could not write`.
 - Nothing is written without `--apply`, and a run that exits 3 or 4 writes nothing at all. It also
   leaves an older file at `--out` as it was, so a nightly job that reuses one `--out` path can read
   yesterday's classification after today's run was refused. Check the exit code before reading
   the file.
-- The default `--move-tolerance`, the default `--sample` and the percent figures in messages are
-  not pinned by an assertion.
+- The default `--sample` and the percent figures in messages are not pinned by an assertion.
 - A CSV cell over 131,072 characters, such as a WKT geometry, stops the run with `error: field
   larger than field limit (131072)` and exit 2. A
   compared column that holds long text prints the whole cell on both sides of every `CHANGED`
   line, and in `--out`. Leave such a column out with `--compare-fields`.
-- Non-ASCII digit characters, such as Arabic-Indic digits, are also read as numbers, so `123` and
-  its Arabic-Indic form compare as equal and read as a valid coordinate. A cell with underscores,
-  such as `1_000`, also compares equal to `1000`.
+- A coordinate or area cell goes through Python `float()`, which also reads non-ASCII digits such
+  as Arabic-Indic digits. Such a cell reads as a valid coordinate. An attribute cell does not:
+  its non-ASCII digits are text, so `123` and its Arabic-Indic form are `CHANGED`.
 - Leading tab and carriage return in a key are stripped on read, so the tab and CR guard matters
   only for a column name.
 - Do not use an `--out` file as an input vintage. Its key column carries the apostrophe guard, so
@@ -621,7 +638,8 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
   replaces the exit code. Read the printed `VERDICT` line as well.
 - `--self-test` exits 1 on a failed assertion, the same code a data run uses for a reissued key.
   Do not run both under one exit-code mapping. A pipe closed early, as in `--self-test | head -2`,
-  ends in exit 70 with an OSError traceback.
+  makes `main()` return 70 on Ubuntu. On Windows the status was 70 when stderr was not piped, and
+  120 with `2>&1 | head`, because Python then failed to flush stdout at shutdown. Neither is 0 or 1.
 - The Windows path behaviours listed here (device names such as `CON`, alternate data streams and
   extended-length paths) were observed on one machine. Microsoft's
   [Naming Files, Paths, and Namespaces](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file)
@@ -629,7 +647,7 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
 - A key that already starts with an apostrophe is written unchanged, so `'=1` and `=1` look the
   same in `--out`.
 - The self-test was run on Python 3.9.25, 3.12.10 and 3.13.2 on Windows and on 3.12.3 on Ubuntu.
-  Every run printed the same 246 assertions. Python 3.9 is the lowest version I tested.
+  Every run printed the same 252 assertions. Python 3.9 is the lowest version I tested.
 - Trailing empty rows such as `,,,` from a spreadsheet export count as rows with no key, so the
   run exits 3 until the rows are deleted or `--allow-blank-keys` is passed. That is the safe
   direction, and the message names the flag.
