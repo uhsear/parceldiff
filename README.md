@@ -47,11 +47,14 @@ PASS  keys spelled 0012 and 12 pair nothing, so the run exits 4, not 0  <-- pinn
 PASS  a diff with no coordinate and no area column exits 4, not a clean 0  <-- pinned defect
 PASS  an area column that is blank on every row exits 4, not a clean 0  <-- pinned defect
 PASS  one readable pair in fifty exits 4, not a clean 0  <-- pinned defect
+PASS  nine pairs in ten exits 4 by default, not a clean 0  <-- pinned defect
 ...
 PASS  an unquoted comma that hides a USE change exits 2, not a false clean 0  <-- pinned defect
 ...
 PASS  --ap is refused, not read as --apply, and writes nothing  <-- pinned defect
 ...
+PASS  one pair in ten left unmeasured exits 4, not a clean 0  <-- pinned defect
+PASS  OLD and NEW as one file exit 64, not a clean 0  <-- pinned defect
 PASS  degrees with one -9999 row are refused, not reported as a clean 'moved 1.8 ft'  <-- pinned defect
 PASS  a -9999 coordinate is unmeasured, so it exits 4, not 1 'different parcel'  <-- pinned defect
 PASS  a renamed only-attribute column exits 4, not a clean 0 over changed owners  <-- pinned defect
@@ -77,10 +80,10 @@ PASS  check() and raises() really do record a failure  <-- pinned defect
 PASS  the footer reports failures by count and by name, and exits 1  <-- pinned defect
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-255 assertions, 0 failed
+262 assertions, 0 failed
 ```
 
-The full run prints all 255 assertions. Each `...` line above is where this block is cut.
+The full run prints all 262 assertions. Each `...` line above is where this block is cut.
 
 ## What already exists
 
@@ -151,15 +154,15 @@ equivalent, and no more.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no
 database. Both vintages are CSVs, which is what every parcel layer can be exported as.
 
-The self-test prints the same 255 assertions on Windows (Python 3.13.2, 3.12.10 and 3.9.25) and on
+The self-test prints the same 262 assertions on Windows (Python 3.13.2, 3.12.10 and 3.9.25) and on
 Ubuntu (Python 3.12.3). The raw SHA-256 of the two outputs differs, because Windows writes CRLF line
 endings and Ubuntu writes LF. After CRLF is converted to LF, the Windows 3.13.2 output and the
-Ubuntu 3.12.3 output have the same SHA-256, `3270aca1ce97b754bcc6a390a8b6397972cda0bd1dd0e257cde37576d65e8138`
-(the raw Windows value was `8e9a9f7b00bc9694d9fa38ae0f0a36f6c1b522c5729cb557c06c66513d132b10`).
+Ubuntu 3.12.3 output have the same SHA-256, `903e5602ee11391be04620c75539bdab3944d92fdf05a84c02b1c3a52aeded70`
+(the raw Windows value was `20439dfa21c1d2a18ec7ba52ddb72d6a478163ee2abd9ce29df3071673bb542c`).
 `coverage run --branch parceldiff.py --self-test` reports 100 percent of statements and branches
-(1157 statements, 208 branches) on Windows and on Ubuntu. Ubuntu has no `coverage` package
-installed, so I copied the pure-Python `coverage` 7.16.1 package from the Windows virtual
-environment into the scratch folder and ran it with `COVERAGE_CORE=pytrace PYTHONPATH=.`.
+(1180 statements, 210 branches) on Windows and on Ubuntu. The Ubuntu system Python has no
+`coverage` package. I ran a copy of the pure-Python `coverage` 7.16.1 package from a scratch folder
+with `COVERAGE_CORE=pytrace PYTHONPATH=.`, so `import coverage` works there only from that folder.
 
 The key is compared as text and the geometry is read from columns. The tool measures a straight
 line between two centroids and converts nothing. Both vintages must already be in one projected
@@ -199,7 +202,7 @@ python parceldiff.py old.csv new.csv --x-field X --y-field Y --area-field ACRES 
 | `--area-ratio` | `2.0` | An area factor above this means the key names a different parcel. |
 | `--move-tolerance` | `1.0` | A shift above this, and not above the reuse distance, counts as a changed geometry. |
 | `--min-overlap` | `0.5` | The share of the smaller vintage's keys, and of the larger one's, that must be on both sides. |
-| `--min-measured` | `0.9` | The share of the shared keys that each reuse test must have measured. |
+| `--min-measured` | `1.0` | The share of the shared keys that each reuse test must have measured. |
 | `--skip-reuse-check` | off | Accept a plain diff when no coordinate or area column is named. Without it such a run exits 4. |
 | `--allow-blank-keys` | off | Leave rows with no key out and count them, instead of refusing the run. |
 | `--units` | `ft` | Label printed after every distance. Nothing is converted. |
@@ -207,7 +210,7 @@ python parceldiff.py old.csv new.csv --x-field X --y-field Y --area-field ACRES 
 | `--projected` | off | Say the coordinates are projected, to skip the check that refuses degrees. |
 | `--out` | off | Write the classification of every key to this CSV. Needs `--apply`. |
 | `--apply` | off | Actually write. Without it nothing is written. |
-| `--self-test` | off | Run the assertions and exit. Other flags are ignored. |
+| `--self-test` | off | Run the assertions and exit. Other valid flags are ignored, and an invalid flag still exits 64. |
 
 Every flag must be spelled in full. The parser sets `allow_abbrev=False`, so `--ap` is refused
 with exit 64 instead of being read as `--apply`, `--appl` is refused too, and `--key` is refused
@@ -362,8 +365,9 @@ Two columns together can make a key that one column cannot. `--key-field BOOK,PA
 as the key. A row with a blank part in the key is a row with no key.
 
 **Refusal 2: a run that compared nothing.** A run is clean only when at least one key was on both
-sides. The leading-zero case shows it. `a.csv` holds `0012` and `0013`, `b.csv` holds `12` and
-`13`:
+sides. The leading-zero case shows it. Both files have the header `PARCEL,OWNER`. `a.csv` holds
+`0012` and `0013`, `b.csv` holds `12` and `13`. A file with the key column alone would add a second
+reason, that no column was compared:
 
 ```
 $ python parceldiff.py a.csv b.csv --skip-reuse-check
@@ -421,8 +425,8 @@ VERDICT: UNVERIFIED, the centroid test measured no pair, because every coordinat
 ```
 
 A test that measured only a few pairs is not much better, because a reissued key among the rest
-goes unseen. Each requested test must measure at least `--min-measured` of the shared keys, 0.9 by
-default. Here three of ten pairs have a blank coordinate in the new vintage, so seven of ten were
+goes unseen. Each requested test must measure at least `--min-measured` of the shared keys, 1.0
+(every pair) by default. Here three of ten pairs have a blank coordinate in the new vintage, so seven of ten were
 measured:
 
 ```
@@ -438,14 +442,31 @@ pairs the key-reuse check could not measure:
   K8 (centroid test)
   K9 (centroid test)
 
-VERDICT: UNVERIFIED, the centroid test measured only 7 of 10 pair(s), under the 90 percent floor, so a reissued key among the rest would go unseen.
+VERDICT: UNVERIFIED, the centroid test measured only 7 of 10 pair(s), under the 100 percent floor, so a reissued key among the rest would go unseen. Fix the blank values, or lower --min-measured to accept the skip.
 ```
 
-With one blank coordinate, nine of ten were measured. That is exactly the floor, so the run passes.
-The verdict and a section of the report still name the pair that was not measured:
+With one blank coordinate, nine of ten were measured. The default floor is every pair, so the run
+exits 4 and the tenth pair, where a reissued key could hide, is not waved through:
 
 ```
 $ python parceldiff.py p_old.csv p_new.csv --x-field X --y-field Y
+parceldiff: p_old.csv 10 row(s), p_new.csv 10 row(s), key PARCEL
+keys classified: 10 of 10
+  UNCHANGED  10
+pairs: 10 on a shared key, 100 percent of the smaller vintage
+key reuse: checked on 9 of 10 pair(s), by centroid moved above 500.0 ft
+
+pairs the key-reuse check could not measure:
+  K9 (centroid test)
+
+VERDICT: UNVERIFIED, the centroid test measured only 9 of 10 pair(s), under the 100 percent floor, so a reissued key among the rest would go unseen. Fix the blank values, or lower --min-measured to accept the skip.
+```
+
+Lowering the floor is the operator's decision. With `--min-measured 0.9` the same run passes. The
+verdict and a section of the report still name the pair that was not measured:
+
+```
+$ python parceldiff.py p_old.csv p_new.csv --x-field X --y-field Y --min-measured 0.9
 parceldiff: p_old.csv 10 row(s), p_new.csv 10 row(s), key PARCEL
 keys classified: 10 of 10
   UNCHANGED  10
@@ -489,8 +510,10 @@ The tool does not read its own `--out` back as a vintage, so it has no code that
 apostrophe. Strip one leading apostrophe yourself if another program reads the file. The self-test
 writes all six leaders to both text columns through `write_classified`, and a key and a column
 name through the command line. It breaks (6 assertions fail) when the guard is switched off. The
-guard is the single-quote prefix that [OWASP lists for CSV injection](https://owasp.org/www-community/attacks/CSV_Injection).
-OWASP also says that prefix is not reliable in Excel after a person saves and reopens the file,
+guard is the single-quote prefix. [OWASP](https://community.owasp.org/attacks/CSV_Injection) (fetched 2026-11-12;
+the old owasp.org/www-community address redirects there) lists it with the words "Prepend each cell field
+with a single quote." OWASP also says "The above techniques are not reliable in Microsoft Excel
+after saving and re-opening the CSV file,"
 and names a tab prefix inside a quoted field as the Excel-resistant form. I did not check how
 Excel shows either one.
 
@@ -505,12 +528,12 @@ trusted.
 
 | Code | Meaning |
 |---|---|
-| 0 | A diff was produced, the reuse check ran on enough pairs, and none of the measured pairs was reissued. Up to `1 - --min-measured` of the shared keys may be unmeasured, and the verdict and the report name them, so read that line. Changes, additions and removals do not fail the gate. With `--skip-reuse-check` the reuse check did not run, and with `--allow-blank-keys` the keyless rows were left out of the diff. The verdict says so in both cases. |
+| 0 | A diff was produced, the reuse check ran on enough pairs, and none of the measured pairs was reissued. By default every shared pair was measured. If you lowered `--min-measured`, up to `1 - --min-measured` of the shared keys may be unmeasured, and the verdict and the report name them, so read that line. Changes, additions and removals do not fail the gate. With `--skip-reuse-check` the reuse check did not run, and with `--allow-blank-keys` the keyless rows were left out of the diff. The verdict says so in both cases. |
 | 1 | At least one key now names a different parcel. Do not pair these rows. |
 | 2 | A file could not be read (a file that is not UTF-8 counts), or `--out` could not be written. |
 | 3 | Refused. A key is on more than one row, or a row has no key, so nothing was compared. |
 | 4 | The run could not be trusted. No key is on both sides, too few are on both sides of either vintage, a column on one side only, as a rename leaves, no column to compare, a requested reuse test measured too few pairs, or no reuse test was asked for. |
-| 64 | Usage error, including a column that is not in the CSV, a repeated column name, an unknown or abbreviated flag, an output path that is an input, and coordinates that look like degrees. |
+| 64 | Usage error, including a column that is not in the CSV, a repeated column name, an unknown or abbreviated flag, an output path that is an input, OLD and NEW that are one file, and coordinates that look like degrees. |
 | 70 | An unexpected crash. This is a fault in the tool and not a finding. The traceback is on stderr. |
 
 Exit 3 is deliberately not exit 1. A job that files a finding for "a key was reissued" must not
@@ -526,7 +549,7 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
 - It reads centroids and areas from columns. It does not read a polygon, a shapefile, a
   geodatabase or an SDE connection, and it does not compute a centroid. Reading a geodatabase
   would need `arcpy`, which would stop the tool running anywhere else.
-- `500`, `2.0`, `1.0`, `0.5` and `0.9` are defaults and not a standard. I did not measure them on a
+- `500`, `2.0`, `1.0`, `0.5` and `1.0` are defaults and not a standard. I did not measure them on a
   real layer. Measure the shifts between two of your own vintages, then set the flags. Do not
   inherit these numbers because they are printed here.
 - The area test flags a split that kept the parent's number, because the parent's area falls by
@@ -648,7 +671,7 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
 - A key that already starts with an apostrophe is written unchanged, so `'=1` and `=1` look the
   same in `--out`.
 - The self-test was run on Python 3.9.25, 3.12.10 and 3.13.2 on Windows and on 3.12.3 on Ubuntu.
-  Every run printed the same 255 assertions. Python 3.9 is the lowest version I tested.
+  Every run printed the same 262 assertions. Python 3.9 is the lowest version I tested.
 - Trailing empty rows such as `,,,` from a spreadsheet export count as rows with no key, so the
   run exits 3 until the rows are deleted or `--allow-blank-keys` is passed. That is the safe
   direction, and the message names the flag.
@@ -666,8 +689,25 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
   column twice, with no warning.
 - A start-up failure before `main()` runs, such as an interpreter older than 3.9 that cannot
   compile the file, exits 1. This tool also uses 1 for a reissued key.
-- Giving the same file as OLD and NEW is not detected. The run compares the file with itself and
-  reports a clean diff, so a job whose two path variables resolve to one file gets a clean verdict.
+- OLD and NEW are refused with exit 64 when they resolve to one real path. The check compares
+  real paths only, so a hard link or a Windows extended-length spelling of the same file passes
+  it, and the run then compares the file with itself and prints a clean verdict with exit 0.
+- If every key moves, the tool reports exit 1 and does not check the CRS, so feet against metres
+  looks like every key reissued.
+- A hard link to an input file passes the `--out` check, so `--apply` overwrites that input.
+- Windows path forms other than reserved device names were observed on one machine and no cited
+  Microsoft page covers them.
+- A reader that closes the pipe early ends the run with exit 70 and a traceback.
+- The tool prints keys, column names and changed values to the terminal as they are, so a cell
+  that holds ANSI escape sequences can redraw or hide lines. Read output from untrusted files in
+  a pager that shows control characters.
+- A column name that starts with a line feed leads the `detail` cell and is written unguarded,
+  because the guard covers only the six listed leaders.
+- Leading tab and carriage return in a key are stripped before the key is read, so the tab and CR
+  guard on `key` is reached through `write_classified` only. Through the command line it is
+  reached by a column name in `detail`.
+- Ctrl-C ends the run with the platform's interrupt status. Treat any status outside 0, 1, 2, 3,
+  4, 64 and 70 as a failed run.
 - A NUL byte inside a key or cell is not refused. It prints to the console and goes to `--out` unchanged.
 - The self-test pins the hard-link overwrite above as a passing assertion, because it is a documented
   limit and not a fix. If that limit is fixed later, that assertion flips and the count here changes.

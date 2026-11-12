@@ -82,9 +82,11 @@ DEFAULT_MIN_OVERLAP = 0.5
 # Share of the shared keys that each requested reuse test must have measured.
 # A pair with a blank or unreadable coordinate or area was not tested, and a
 # reissued key among such pairs is invisible. Below this share the run cannot
-# say the keys are sound, so it exits 4. A test that measured no pair always
-# fails the run, whatever this is set to.
-DEFAULT_MIN_MEASURED = 0.9
+# say the keys are sound, so it exits 4. The default is every pair, because a
+# run that skipped a pair must not read as clean; a lower --min-measured is
+# the operator's signed acceptance. A test that measured no pair always fails
+# the run, whatever this is set to.
+DEFAULT_MIN_MEASURED = 1.0
 
 DEFAULT_KEY_FIELD = "PARCEL"
 DEFAULT_UNITS = "ft"
@@ -443,7 +445,8 @@ def unverified_reasons(report):
         elif got / float(report.pairs) < report.min_measured:
             reasons.append("the %s test measured only %d of %d pair(s), under "
                            "the %.0f percent floor, so a reissued key among "
-                           "the rest would go unseen"
+                           "the rest would go unseen. Fix the blank values, "
+                           "or lower --min-measured to accept the skip"
                            % (name, got, report.pairs,
                               100.0 * report.min_measured))
     return reasons
@@ -845,6 +848,13 @@ def _self_test(tmp):
         with open(path, "w", newline="", encoding="utf-8") as handle:
             handle.write(text)
         return path
+
+    def twin(path):
+        """A copy of path, so a run can read two vintages that are alike."""
+        copy = path + ".twin"
+        with open(path, "rb") as source, open(copy, "wb") as target:
+            target.write(source.read())
+        return copy
 
     def run_cli(argv):
         out, err = io.StringIO(), io.StringIO()
@@ -1279,15 +1289,22 @@ def _self_test(tmp):
           "  <-- pinned defect")
     report = compare(areas(10, 7), areas(10, 7), check_area=True)
     check(gate(report) == 4 and report.measured_area == 7
-          and "the area test measured only 7 of 10 pair(s), under the 90 "
-          "percent floor" in describe(report)[-1],
+          and "the area test measured only 7 of 10 pair(s), under the 100 "
+          "percent floor" in describe(report)[-1]
+          and "lower --min-measured" in describe(report)[-1],
           "seven readable areas in ten is under the floor and exits 4"
           "  <-- pinned defect")
     report = compare(areas(10, 9), areas(10, 9), ("OWNER",),
                      check_area=True)
+    check(gate(report) == 4 and report.measured_area == 9,
+          "nine readable areas in ten exits 4 by default, because a "
+          "reissued key on the tenth pair would go unseen  <-- pinned defect")
+    report = compare(areas(10, 9), areas(10, 9), ("OWNER",),
+                     check_area=True, min_measured=0.9)
     check(gate(report) == 0 and report.measured_area == 9
           and report.unmeasured == [("K9", "area")],
-          "nine readable areas in ten is exactly the floor and passes")
+          "nine readable areas in ten passes when the operator lowers the "
+          "floor to 0.9")
     report = compare(areas(2, 1), areas(2, 2), check_area=True)
     check(gate(report) == 4 and report.measured_area == 1,
           "an area that is unreadable on one side only is not measured")
@@ -1302,7 +1319,7 @@ def _self_test(tmp):
           "reads  <-- pinned defect")
     report = compare(spread(50, 1), spread(50, 1), check_xy=True)
     check(gate(report) == 4 and report.measured_xy == 1
-          and "measured only 1 of 50 pair(s), under the 90 percent floor"
+          and "measured only 1 of 50 pair(s), under the 100 percent floor"
           in describe(report)[-1],
           "one readable pair in fifty exits 4, not a clean 0"
           "  <-- pinned defect")
@@ -1310,7 +1327,11 @@ def _self_test(tmp):
     check(gate(report) == 4,
           "seven readable pairs in ten is under the floor and exits 4"
           "  <-- pinned defect")
-    report = compare(spread(10, 9), spread(10, 9), check_xy=True)
+    check(gate(compare(spread(10, 9), spread(10, 9), check_xy=True)) == 4,
+          "nine pairs in ten exits 4 by default, not a clean 0"
+          "  <-- pinned defect")
+    report = compare(spread(10, 9), spread(10, 9), check_xy=True,
+                     min_measured=0.9)
     lines = describe(report)
     check(gate(report) == 0 and report.measured == 9
           and report.unmeasured == [("K9", "centroid")]
@@ -1318,11 +1339,13 @@ def _self_test(tmp):
           and "1 pair(s) could not be measured for key reuse." in lines[-1]
           and "K9 (centroid test)" in "\n".join(lines)
           and "checked on 9 of 10 pair(s)" in "\n".join(lines),
-          "nine pairs in ten is exactly the floor: the run passes, and "
+          "nine pairs in ten passes under a floor of 0.9, and "
           "the verdict and the report name the pair it could not measure")
     check(gate(compare(spread(10, 9), spread(10, 9), check_xy=True,
                        min_measured=1.0)) == 4,
           "a floor of 1 refuses a run that left one pair unmeasured")
+    check(gate(compare(spread(10, 10), spread(10, 10), check_xy=True)) == 0,
+          "the default floor passes a run that measured every pair")
     check(gate(compare(spread(50, 1), spread(50, 1), check_xy=True,
                        min_measured=0.0)) == 0,
           "a floor of 0 accepts any run that measured one pair")
@@ -1570,10 +1593,10 @@ def _self_test(tmp):
           and "wrote " not in out,
           "a refused run writes nothing even with --apply")
     gap = put("gap.csv", "PARCEL,OWNER\n,Ames\nP-1,Baker\n")
-    code, out, _ = run_cli([gap, gap])
+    code, out, _ = run_cli([gap, twin(gap)])
     check(code == 3 and "old line 2 has no key" in out,
           "a blank key exits 3")
-    code, out, _ = run_cli([gap, gap, "--allow-blank-keys",
+    code, out, _ = run_cli([gap, twin(gap), "--allow-blank-keys",
                             "--skip-reuse-check"])
     check(code == 0 and "  UNKEYED    2" in out
           and "VERDICT: clean. 0 changed, 0 added, 0 removed, 2 row(s) left "
@@ -1594,15 +1617,15 @@ def _self_test(tmp):
           "an UNVERIFIED run writes no file even with --apply, so a job "
           "never reads a plausible diff from it  <-- pinned defect")
     sep_old = put("s_old.csv", "PARCEL,X,Y\nA,\"620,100\",1580200\n")
-    code, out, _ = run_cli([sep_old, sep_old, "--x-field", "X", "--y-field",
+    code, out, _ = run_cli([sep_old, twin(sep_old), "--x-field", "X", "--y-field",
                             "Y"])
     check(code == 4 and "measured no pair" in out,
           "thousands separators in every coordinate exit 4, not 0"
           "  <-- pinned defect")
     comp_path = put("comp.csv", "BOOK,PAGE,OWNER\n7,1,A\n7,2,B\n")
-    code, out, _ = run_cli([comp_path, comp_path, "--key-field", "BOOK"])
+    code, out, _ = run_cli([comp_path, twin(comp_path), "--key-field", "BOOK"])
     check(code == 3, "a composite key's first column alone is refused")
-    code, out, _ = run_cli([comp_path, comp_path, "--key-field",
+    code, out, _ = run_cli([comp_path, twin(comp_path), "--key-field",
                             "BOOK, PAGE", "--skip-reuse-check"])
     check(code == 0 and "key BOOK|PAGE" in out,
           "naming both columns makes the key unique, spaces and all")
@@ -1653,7 +1676,7 @@ def _self_test(tmp):
     utf16 = os.path.join(tmp, "utf16.csv")
     with open(utf16, "wb") as handle:
         handle.write(u"PARCEL,OWNER\nA,B\n".encode("utf-16"))
-    code, _, err = run_cli([utf16, utf16, "--skip-reuse-check"])
+    code, _, err = run_cli([utf16, twin(utf16), "--skip-reuse-check"])
     check(code == 2 and "is not UTF-8" in err,
           "a UTF-16 export is refused as not UTF-8, on every Python "
           "version  <-- pinned defect")
@@ -1680,16 +1703,16 @@ def _self_test(tmp):
     code, _, err = run_cli([tmp, new_path])
     check(code == 2, "a directory in place of a file exits 2")
     huge = put("huge.csv", "PARCEL,OWNER\nA," + "x" * 140000 + "\n")
-    code, _, err = run_cli([huge, huge])
+    code, _, err = run_cli([huge, twin(huge)])
     check(code == 2 and "field larger than field limit" in err,
           "a cell over the csv size limit exits 2, not a crash")
     degrees = put("deg.csv", "PARCEL,X,Y\nA,-82.1,29.2\n")
-    code, _, err = run_cli([degrees, degrees, "--x-field", "X", "--y-field",
+    code, _, err = run_cli([degrees, twin(degrees), "--x-field", "X", "--y-field",
                             "Y"])
     check(code == 64 and "look like degrees" in err,
           "coordinates that fit longitude and latitude are refused"
           "  <-- pinned defect")
-    code, out, _ = run_cli([degrees, degrees, "--x-field", "X", "--y-field",
+    code, out, _ = run_cli([degrees, twin(degrees), "--x-field", "X", "--y-field",
                             "Y", "--projected"])
     check(code == 0, "--projected skips the degrees check")
     dg_old = put("dg_old.csv", "PARCEL,X,Y\nA,-82.1,29.2\nB,-82.2,29.3\n"
@@ -1701,6 +1724,30 @@ def _self_test(tmp):
     check(code == 64 and "look like degrees" in err and out == "",
           "degrees with one -9999 row are refused, not reported as a clean "
           "'moved 1.8 ft'  <-- pinned defect")
+
+    p_rows = "".join("K%d,%d,%d,5.0\n" % (n, 1000 * n, 2000 * n)
+                     for n in range(1, 11))
+    p_old = put("p_old.csv", "PARCEL,X,Y,ACRES\n" + p_rows)
+    p_new = put("p_new.csv", "PARCEL,X,Y,ACRES\n" + p_rows.replace(
+        "K9,9000,18000,", "K9,,,"))
+    code, out, _ = run_cli([p_old, p_new, "--x-field", "X", "--y-field",
+                            "Y"])
+    check(code == 4 and "measured only 9 of 10" in out
+          and "VERDICT: clean" not in out,
+          "one pair in ten left unmeasured exits 4, not a clean 0"
+          "  <-- pinned defect")
+    code, out, _ = run_cli([p_old, p_new, "--x-field", "X", "--y-field",
+                            "Y", "--min-measured", "0.9"])
+    check(code == 0 and "1 pair(s) could not be measured" in out,
+          "--min-measured 0.9 accepts the skip, and the verdict names it")
+    code, out, err = run_cli([p_old, p_old, "--x-field", "X", "--y-field",
+                              "Y", "--area-field", "ACRES"])
+    check(code == 64 and out == "" and "are the same file" in err,
+          "OLD and NEW as one file exit 64, not a clean 0"
+          "  <-- pinned defect")
+    code, out, err = run_cli([p_old, os.path.join(tmp, ".", "p_old.csv")])
+    check(code == 64 and "are the same file" in err,
+          "the same file spelled another way is refused too")
 
     nd_old = put("nd_old.csv", "PARCEL,X,Y\nP-1,620100,1580200\n"
                                "P-2,620500,1580600\n")
@@ -1735,17 +1782,17 @@ def _self_test(tmp):
     check(code == 0 and "VERDICT: clean" in out,
           "--compare-fields accepts the skipped columns and the run is clean")
     keys_only = put("keys_only.csv", "PARCEL\nA\nB\n")
-    code, out, _ = run_cli([keys_only, keys_only, "--skip-reuse-check"])
+    code, out, _ = run_cli([keys_only, twin(keys_only), "--skip-reuse-check"])
     check(code == 4 and "VERDICT: clean" not in out
           and "no column was compared" in out.splitlines()[-1],
           "a layer of keys alone compared nothing and exits 4, not a clean "
           "0  <-- pinned defect")
-    code, out, _ = run_cli([keys_only, keys_only, "--skip-reuse-check",
+    code, out, _ = run_cli([keys_only, twin(keys_only), "--skip-reuse-check",
                             "--compare-fields", "PARCEL"])
     check(code == 0 and "VERDICT: clean" in out,
           "naming the key itself in --compare-fields accepts a key-only diff")
     xy_keys = put("xy_keys.csv", "PARCEL,X,Y\nA,1,1\nB,2,2\n")
-    code, out, _ = run_cli([xy_keys, xy_keys, "--x-field", "X", "--y-field",
+    code, out, _ = run_cli([xy_keys, twin(xy_keys), "--x-field", "X", "--y-field",
                             "Y", "--projected"])
     check(code == 0 and "VERDICT: clean" in out,
           "a key and coordinates only still compares the centroid, so it is "
@@ -1813,7 +1860,7 @@ def _self_test(tmp):
     check(code == 2 and "cp_new.csv" in err,
           "the refusal names whichever file is not UTF-8")
     utf8_fix = put("utf8_fix.csv", u"PARCEL,OWNER\nA,Mu\u00f1oz\n")
-    code, out, _ = run_cli([utf8_fix, utf8_fix, "--skip-reuse-check"])
+    code, out, _ = run_cli([utf8_fix, twin(utf8_fix), "--skip-reuse-check"])
     check(code == 0 and "UNCHANGED  1" in out,
           "the same text saved as UTF-8 reads")
     code, out, err = run_cli([utf8_fix, old_fix, "--skip-reuse-check"])
@@ -1855,7 +1902,7 @@ def _self_test(tmp):
           "a line break and a terminal escape in a cell print as they are")
     eq_path = put("eq.csv", "PARCEL,OWNER\n=1+1,A\n")
     eq_out = os.path.join(tmp, "eq_out.csv")
-    run_cli([eq_path, eq_path, "--skip-reuse-check", "--out", eq_out,
+    run_cli([eq_path, twin(eq_path), "--skip-reuse-check", "--out", eq_out,
              "--apply"])
     check("UNCHANGED,'=1+1,2,2," in slurp(eq_out)
           and "UNCHANGED,=1+1" not in slurp(eq_out),
@@ -1895,7 +1942,7 @@ def _self_test(tmp):
           "a cell that does not start with a leader is written as it came")
     neg_old = put("neg_old.csv", "PARCEL,OWNER\n-5,a\n+7,a\n")
     neg_out = os.path.join(tmp, "neg_out.csv")
-    run_cli([neg_old, neg_old, "--skip-reuse-check", "--out", neg_out,
+    run_cli([neg_old, twin(neg_old), "--skip-reuse-check", "--out", neg_out,
              "--apply"])
     with open(neg_out, newline="", encoding="utf-8") as handle:
         negated = list(csv.DictReader(handle))
@@ -1967,7 +2014,7 @@ def _self_test(tmp):
           "a write that fails half way exits 2 and leaves the partial file "
           "it had written")
     unkeyed_path = os.path.join(tmp, "unkeyed.csv")
-    run_cli([gap, gap, "--allow-blank-keys", "--skip-reuse-check", "--out",
+    run_cli([gap, twin(gap), "--allow-blank-keys", "--skip-reuse-check", "--out",
              unkeyed_path, "--apply"])
     with open(unkeyed_path, newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
@@ -2248,6 +2295,13 @@ def _run(argv):
         return 64
     if args.apply and not args.out:
         print("error: --apply needs --out.", file=sys.stderr)
+        return 64
+    if _same_file(args.old, args.new):
+        # A job whose two path variables collapse to one file would read a
+        # clean diff every night. Exit 64: this is a usage fault, not a diff.
+        print("error: OLD and NEW are the same file, %s. Comparing a file "
+              "with itself finds nothing. Check the two paths."
+              % args.old, file=sys.stderr)
         return 64
     if args.out:
         # Checked on a dry run too: the run that would clobber a vintage
