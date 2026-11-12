@@ -53,6 +53,7 @@ PASS  an unquoted comma that hides a USE change exits 2, not a false clean 0  <-
 PASS  --ap is refused, not read as --apply, and writes nothing  <-- pinned defect
 ...
 PASS  degrees with one -9999 row are refused, not reported as a clean 'moved 1.8 ft'  <-- pinned defect
+PASS  a -9999 coordinate is unmeasured, so it exits 4, not 1 'different parcel'  <-- pinned defect
 PASS  a renamed only-attribute column exits 4, not a clean 0 over changed owners  <-- pinned defect
 PASS  a partly renamed layer exits 4 and names the columns, not a clean 0 over changed owners  <-- pinned defect
 ...
@@ -76,10 +77,10 @@ PASS  check() and raises() really do record a failure  <-- pinned defect
 PASS  the footer reports failures by count and by name, and exits 1  <-- pinned defect
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-252 assertions, 0 failed
+255 assertions, 0 failed
 ```
 
-The full run prints all 252 assertions. Each `...` line above is where this block is cut.
+The full run prints all 255 assertions. Each `...` line above is where this block is cut.
 
 ## What already exists
 
@@ -150,13 +151,13 @@ equivalent, and no more.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no
 database. Both vintages are CSVs, which is what every parcel layer can be exported as.
 
-The self-test prints the same 252 assertions on Windows (Python 3.13.2, 3.12.10 and 3.9.25) and on
+The self-test prints the same 255 assertions on Windows (Python 3.13.2, 3.12.10 and 3.9.25) and on
 Ubuntu (Python 3.12.3). The raw SHA-256 of the two outputs differs, because Windows writes CRLF line
 endings and Ubuntu writes LF. After CRLF is converted to LF, the Windows 3.13.2 output and the
-Ubuntu 3.12.3 output have the same SHA-256, `2d2a485cc3fab7d54333285ba3667285524b230f8802ab53c5b322288bd1ad6e`
-(the raw Windows value was `435deb17bedc705669aef253123f0680ead8c28a3c4478d6374a319e26ad1729`).
+Ubuntu 3.12.3 output have the same SHA-256, `3270aca1ce97b754bcc6a390a8b6397972cda0bd1dd0e257cde37576d65e8138`
+(the raw Windows value was `8e9a9f7b00bc9694d9fa38ae0f0a36f6c1b522c5729cb557c06c66513d132b10`).
 `coverage run --branch parceldiff.py --self-test` reports 100 percent of statements and branches
-(1147 statements, 208 branches) on Windows and on Ubuntu. Ubuntu has no `coverage` package
+(1157 statements, 208 branches) on Windows and on Ubuntu. Ubuntu has no `coverage` package
 installed, so I copied the pure-Python `coverage` 7.16.1 package from the Windows virtual
 environment into the scratch folder and ran it with `COVERAGE_CORE=pytrace PYTHONPATH=.`.
 
@@ -164,7 +165,7 @@ The key is compared as text and the geometry is read from columns. The tool meas
 line between two centroids and converts nothing. Both vintages must already be in one projected
 CRS, in feet or in metres. When more than half of the usable coordinates fit longitude (-180 to
 180) and latitude (-90 to 90), the tool refuses the run and says the values look like degrees. A
-few `-9999` no-data rows among degrees do not switch the check off. A local grid that really sits
+few `-9999` no-data rows among degrees do not switch the check off. A `-9999` in a coordinate column is no-data, not a place: the pair is counted as not measured (as a blank is) and is never judged reissued on it. An area at or below zero, `-9999` included, is already unmeasured. A local grid that really sits
 inside that box needs `--projected`.
 
 ```
@@ -504,7 +505,7 @@ trusted.
 
 | Code | Meaning |
 |---|---|
-| 0 | A diff was produced, the reuse check ran on enough pairs, and no key was reissued. Changes, additions and removals do not fail the gate. With `--skip-reuse-check` the reuse check did not run, and with `--allow-blank-keys` the keyless rows were left out of the diff. The verdict says so in both cases. |
+| 0 | A diff was produced, the reuse check ran on enough pairs, and none of the measured pairs was reissued. Up to `1 - --min-measured` of the shared keys may be unmeasured, and the verdict and the report name them, so read that line. Changes, additions and removals do not fail the gate. With `--skip-reuse-check` the reuse check did not run, and with `--allow-blank-keys` the keyless rows were left out of the diff. The verdict says so in both cases. |
 | 1 | At least one key now names a different parcel. Do not pair these rows. |
 | 2 | A file could not be read (a file that is not UTF-8 counts), or `--out` could not be written. |
 | 3 | Refused. A key is on more than one row, or a row has no key, so nothing was compared. |
@@ -647,7 +648,7 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
 - A key that already starts with an apostrophe is written unchanged, so `'=1` and `=1` look the
   same in `--out`.
 - The self-test was run on Python 3.9.25, 3.12.10 and 3.13.2 on Windows and on 3.12.3 on Ubuntu.
-  Every run printed the same 252 assertions. Python 3.9 is the lowest version I tested.
+  Every run printed the same 255 assertions. Python 3.9 is the lowest version I tested.
 - Trailing empty rows such as `,,,` from a spreadsheet export count as rows with no key, so the
   run exits 3 until the rows are deleted or `--allow-blank-keys` is passed. That is the safe
   direction, and the message names the flag.
@@ -665,6 +666,11 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
   column twice, with no warning.
 - A start-up failure before `main()` runs, such as an interpreter older than 3.9 that cannot
   compile the file, exits 1. This tool also uses 1 for a reissued key.
+- Giving the same file as OLD and NEW is not detected. The run compares the file with itself and
+  reports a clean diff, so a job whose two path variables resolve to one file gets a clean verdict.
+- A NUL byte inside a key or cell is not refused. It prints to the console and goes to `--out` unchanged.
+- The self-test pins the hard-link overwrite above as a passing assertion, because it is a documented
+  limit and not a fix. If that limit is fixed later, that assertion flips and the count here changes.
 - Ctrl-C is not caught. An interrupted run ends with a Python traceback and the platform's
   interrupt status, not one of the codes above.
 - This tool writes a CSV, not a spreadsheet or a feature class, and has no rule for a single

@@ -198,6 +198,19 @@ def to_number(text):
     return value if _finite(value) else None
 
 
+# The no-data value GIS exports write into a coordinate cell. It is not a
+# place: read as one, a blank-in-spirit centroid is 1.7 million feet from the
+# real one and the key is judged reissued. An area at or below zero is already
+# unmeasured, so this brings the coordinates in line with it.
+NO_DATA = -9999.0
+
+
+def to_coordinate(text):
+    """A finite float, or None. The -9999 no-data value is not a coordinate."""
+    value = to_number(text)
+    return None if value == NO_DATA else value
+
+
 def key_label(key):
     """The key as shown to a person. A composite key joins with a bar."""
     return "|".join(key)
@@ -710,8 +723,8 @@ def extract_rows(raw_rows, key_fields, x_field, y_field, area_field):
         key = None if any(p == "" for p in parts) else parts
         out.append(Row(
             getattr(raw, "line", None), key, values,
-            to_number(values.get(x_field)) if x_field else None,
-            to_number(values.get(y_field)) if y_field else None,
+            to_coordinate(values.get(x_field)) if x_field else None,
+            to_coordinate(values.get(y_field)) if y_field else None,
             to_number(values.get(area_field)) if area_field else None))
     return out
 
@@ -911,6 +924,14 @@ def _self_test(tmp):
           "a new area of zero gives no ratio either, never a divide by zero")
     check(to_number("1_000") == 1000.0,
           "an underscore is read as a digit separator by float()")
+    check(to_coordinate("-9999") is None and to_coordinate(" -9999.0 ") is None
+          and to_coordinate("-9999.5") == -9999.5
+          and to_coordinate("620100") == 620100.0
+          and to_coordinate("") is None,
+          "a -9999 coordinate is no-data, not a place  <-- pinned defect")
+    check(to_number("-9999") == -9999.0,
+          "an area or other number keeps -9999 as a number (area <= 0 is "
+          "already unmeasured)")
 
     # ---- one pair
     same = mk("k", 0.0, 0.0, 1.0, OWNER="Ames")
@@ -1680,6 +1701,17 @@ def _self_test(tmp):
     check(code == 64 and "look like degrees" in err and out == "",
           "degrees with one -9999 row are refused, not reported as a clean "
           "'moved 1.8 ft'  <-- pinned defect")
+
+    nd_old = put("nd_old.csv", "PARCEL,X,Y\nP-1,620100,1580200\n"
+                               "P-2,620500,1580600\n")
+    nd_new = put("nd_new.csv", "PARCEL,X,Y\nP-1,-9999,-9999\n"
+                               "P-2,620500,1580600\n")
+    code, out, _ = run_cli([nd_old, nd_new, "--x-field", "X", "--y-field",
+                            "Y"])
+    check(code == 4 and "REUSED" not in out and "Do not pair" not in out
+          and "measured only 1 of 2" in out,
+          "a -9999 coordinate is unmeasured, so it exits 4, not 1 'different "
+          "parcel'  <-- pinned defect")
 
     # ---- a column that was renamed or dropped
     drift_a = put("drift_a.csv", "PARCEL,OWNER\nA,x\nB,y\n")
