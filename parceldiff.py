@@ -691,7 +691,24 @@ def read_csv(path):
                         % (path, exc.reason))
 
 
+def _refuse_nul(path):
+    """Refuse a NUL byte on every Python version, with the right line.
+
+    csv reads NUL as text from Python 3.11 and raises from 3.9 and 3.10, with
+    a message that names the wrong line and blames a quote. One answer on all
+    versions: a NUL is a damaged export (UTF-16 text read as UTF-8 has them).
+    """
+    with open(path, "r", newline="", encoding="utf-8-sig") as handle:
+        for number, line in enumerate(handle, 1):
+            if "\x00" in line:
+                raise csv.Error(
+                    "%s line %d holds a NUL byte. The file is damaged or is "
+                    "not UTF-8 text (UTF-16 reads this way). Save the CSV as "
+                    "UTF-8, for example Excel's 'CSV UTF-8'." % (path, number))
+
+
 def _read_rows(path):
+    _refuse_nul(path)
     with open(path, "r", newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle, strict=True)
         header = list(reader.fieldnames or [])
@@ -736,10 +753,15 @@ def extract_rows(raw_rows, key_fields, x_field, y_field, area_field):
                       for k, v in raw.items() if k is not None)
         parts = tuple(values.get(f, "") for f in key_fields)
         key = None if any(p == "" for p in parts) else parts
+        x = to_coordinate(values.get(x_field)) if x_field else None
+        y = to_coordinate(values.get(y_field)) if y_field else None
+        if x == 0.0 and y == 0.0:
+            # A (0, 0) pair is the placeholder an export writes for a parcel
+            # with no geometry: no-data, like -9999. Only the pair counts. A
+            # zero in one axis is a real coordinate.
+            x = y = None
         out.append(Row(
-            getattr(raw, "line", None), key, values,
-            to_coordinate(values.get(x_field)) if x_field else None,
-            to_coordinate(values.get(y_field)) if y_field else None,
+            getattr(raw, "line", None), key, values, x, y,
             to_number(values.get(area_field)) if area_field else None))
     return out
 
@@ -1795,6 +1817,33 @@ def _self_test(tmp):
           and "measured only 1 of 2" in out,
           "a -9999 coordinate is unmeasured, so it exits 4, not 1 'different "
           "parcel'  <-- pinned defect")
+
+    zr_old = put("zr_old.csv", "PARCEL,X,Y\nP-1,620100,1580200\n"
+                               "P-2,620500,1580600\n")
+    zr_new = put("zr_new.csv", "PARCEL,X,Y\nP-1,0,0\nP-2,620500,1580600\n")
+    code, out, _ = run_cli([zr_old, zr_new, "--x-field", "X", "--y-field",
+                            "Y"])
+    check(code == 4 and "REUSED" not in out and "Do not pair" not in out
+          and "measured only 1 of 2" in out,
+          "a (0, 0) coordinate pair is unmeasured, so it exits 4, not 1 "
+          "'different parcel'  <-- pinned defect")
+    zx_new = put("zx_new.csv", "PARCEL,X,Y\nP-1,0,1580200\nP-2,620500,1580600\n")
+    code, out, _ = run_cli([zr_old, zx_new, "--x-field", "X", "--y-field",
+                            "Y"])
+    check(code == 1 and "REUSED" in out,
+          "a zero in one axis only is a real coordinate and is still judged")
+
+    nul_old = os.path.join(tmp, "nul_old.csv")
+    nul_new = os.path.join(tmp, "nul_new.csv")
+    with open(nul_old, "wb") as handle:
+        handle.write(b"PARCEL,OWNER\nK1,a\nK\x002,b\n")
+    with open(nul_new, "wb") as handle:
+        handle.write(b"PARCEL,OWNER\nK1,a\nK\x002,c\n")
+    code, out, err = run_cli([nul_old, nul_new, "--skip-reuse-check"])
+    check(code == 2 and out == "" and "nul_old.csv line 3 holds a NUL" in err
+          and "quote" not in err,
+          "a NUL byte exits 2 with the right line on every Python version"
+          "  <-- pinned defect")
 
     # ---- a column that was renamed or dropped
     drift_a = put("drift_a.csv", "PARCEL,OWNER\nA,x\nB,y\n")

@@ -63,6 +63,8 @@ PASS  one pair in ten left unmeasured exits 4, not a clean 0  <-- pinned defect
 PASS  OLD and NEW as one file exit 64, not a clean 0  <-- pinned defect
 ...
 PASS  a -9999 coordinate is unmeasured, so it exits 4, not 1 'different parcel'  <-- pinned defect
+PASS  a (0, 0) coordinate pair is unmeasured, so it exits 4, not 1 'different parcel'  <-- pinned defect
+PASS  a NUL byte exits 2 with the right line on every Python version  <-- pinned defect
 PASS  a renamed only-attribute column exits 4, not a clean 0 over changed owners  <-- pinned defect
 PASS  a partly renamed layer exits 4 and names the columns, not a clean 0 over changed owners  <-- pinned defect
 ...
@@ -87,10 +89,10 @@ PASS  check() and raises() really do record a failure  <-- pinned defect
 PASS  the footer reports failures by count and by name, and exits 1  <-- pinned defect
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-265 assertions, 0 failed
+268 assertions, 0 failed
 ```
 
-The full run prints all 265 assertions. Each `...` line above is where this block is cut.
+The full run prints all 268 assertions. Each `...` line above is where this block is cut.
 
 ## What already exists
 
@@ -161,13 +163,13 @@ equivalent, and no more.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no
 database. Both vintages are CSVs, which is what every parcel layer can be exported as.
 
-The self-test prints the same 265 assertions on Windows (Python 3.13.2, 3.12.10 and 3.9.25) and on
+The self-test prints the same 268 assertions on Windows (Python 3.13.2, 3.12.10 and 3.9.25) and on
 Ubuntu (Python 3.12.3). The raw SHA-256 of the two outputs differs, because Windows writes CRLF line
 endings and Ubuntu writes LF. After CRLF is converted to LF, the Windows 3.13.2 output and the
-Ubuntu 3.12.3 output have the same SHA-256, `f5a07fa753b0023da9f39dde80f169ea5f8a601591fa3bc6fed7ff34efa239dd`
-(the raw Windows value was `3e9728751aa616aaf4f32769a5536995347340e5e0d99e739837d8b4a6e362d3`).
+Ubuntu 3.12.3 output have the same SHA-256, `f1dbef612d7cb93ab2e10f00a428354c9d09f7c035a3614b98f82b807f69998c`
+(the raw Windows value was `29e1ba96f5e3dc11db6cafaba69d06d2dc27bf1225b10205538a22e759f0d899`).
 `coverage run --branch parceldiff.py --self-test` reports 100 percent of statements and branches
-(1201 statements, 212 branches) on Windows and on Ubuntu. The Ubuntu system Python has no
+(1226 statements, 218 branches) on Windows and on Ubuntu. The Ubuntu system Python has no
 `coverage` package. I ran a copy of the pure-Python `coverage` 7.16.1 package from a scratch folder
 with `COVERAGE_CORE=pytrace PYTHONPATH=.`, so `import coverage` works there only from that folder.
 
@@ -175,7 +177,7 @@ The key is compared as text and the geometry is read from columns. The tool meas
 line between two centroids and converts nothing. Both vintages must already be in one projected
 CRS, in feet or in metres. When more than half of the usable coordinates fit longitude (-180 to
 180) and latitude (-90 to 90), the tool refuses the run and says the values look like degrees. A
-few `-9999` no-data rows among degrees do not switch the check off. A `-9999` in a coordinate column is no-data, not a place: the pair is counted as not measured (as a blank is) and is never judged reissued on it. An area at or below zero, `-9999` included, is already unmeasured. A local grid that really sits
+few `-9999` no-data rows among degrees do not switch the check off. A `-9999` in a coordinate column, or an X and Y that are both `0`, is no-data, not a place: the pair is counted as not measured (as a blank is) and is never judged reissued on it. An area at or below zero, `-9999` included, is already unmeasured. A local grid that really sits
 inside that box needs `--projected`.
 
 ```
@@ -417,8 +419,8 @@ pair, the run exits 4. An export that formats numbers with a thousands separator
 `1,580,200`, and that is not a number:
 
 ```
-$ python parceldiff.py sep.csv sep.csv --x-field X --y-field Y
-parceldiff: sep.csv 2 row(s), sep.csv 2 row(s), key PARCEL
+$ python parceldiff.py sep_old.csv sep_new.csv --x-field X --y-field Y
+parceldiff: sep_old.csv 2 row(s), sep_new.csv 2 row(s), key PARCEL
 keys classified: 2 of 2
   UNCHANGED  2
 pairs: 2 on a shared key, 100 percent of the smaller vintage
@@ -584,9 +586,10 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
   `--keep-first`, because the choice is an edit somebody signs for.
 - A composite key joins its parts with `|` for display. The keys `a|b` plus `c`, and `a` plus
   `b|c`, are different keys to the tool but both print as `a|b|c` in the report and in `--out`.
-- A placeholder coordinate such as `0,0` is read as a real point. Blank out missing coordinates
-  before the run. If most rows of a projected layer hold such a placeholder, the degrees check
-  refuses the run, and `--projected` turns it off.
+- A coordinate pair of exactly `0,0` is read as no-data, like `-9999`: the pair is not measured
+  and is never judged reissued on it. A zero in one axis only is a real coordinate. Any other
+  placeholder, such as `1,1` or `-1,-1`, is read as a real point. Blank out missing coordinates
+  before the run.
 - A coordinate cell is read with Python `float()`, so underscores are accepted as digits. `1_000`
   reads as 1000. A thousands separator such as `1,000` is not a number and reads as no coordinate.
 - The columns named in `--x-field` and `--y-field` are not compared as attributes. A coordinate
@@ -601,8 +604,9 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
 - A character the console cannot show prints as `?` instead of stopping the run. The file the
   tool writes is always UTF-8.
 - A short row has its missing cells read as blank. A lost attribute cell then shows as `CHANGED`.
-  A lost X, Y or area value is not measured, so it can hide a key-reuse pair, and the exit code
-  can stay 0. A row with text in cells beyond the header, which is what an
+  A lost X, Y or area value is not measured, so it can hide a key-reuse pair. With the default
+  `--min-measured 1.0` the run exits 4. The exit code stays 0 only if you lower `--min-measured`
+  and accept the skip. A row with text in cells beyond the header, which is what an
   unquoted comma in an address looks like, is refused with exit 2 and the line number. Extra
   cells that are all blank, from a trailing comma, pass. A quoted cell that is never closed, or text right after a closing quote, is refused with exit 2,
   the file name and the line it was noticed on. Without that, the rest of the file would read as
@@ -682,7 +686,7 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
 - A key that already starts with an apostrophe is written unchanged, so `'=1` and `=1` look the
   same in `--out`.
 - The self-test was run on Python 3.9.25, 3.12.10 and 3.13.2 on Windows and on 3.12.3 on Ubuntu.
-  Every run printed the same 265 assertions. Python 3.9 is the lowest version I tested.
+  Every run printed the same 268 assertions. Python 3.9 is the lowest version I tested.
 - Trailing empty rows such as `,,,` from a spreadsheet export count as rows with no key, so the
   run exits 3 until the rows are deleted or `--allow-blank-keys` is passed. That is the safe
   direction, and the message names the flag.
@@ -723,7 +727,12 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
   `./-old.csv`.
 - Ctrl-C ends the run with the platform's interrupt status. Treat any status outside 0, 1, 2, 3,
   4, 64 and 70 as a failed run.
-- A NUL byte inside a key or cell is not refused. It prints to the console and goes to `--out` unchanged.
+- A NUL byte anywhere in an input file is refused with exit 2, the file name and the physical line
+  it is on, on every Python version. Python 3.9 and 3.10 refuse it in the CSV reader and 3.11 and
+  newer read it as text, so the tool scans for it first to give one answer.
+- A tab or carriage return at the start of a cell can only reach `--out` through a column name,
+  because key values are stripped when they are read. A column name that starts with a line feed, a
+  space or a zero-width character before `=` is written to `detail` unguarded.
 - The self-test pins the hard-link overwrite above as a passing assertion, because it is a documented
   limit and not a fix. If that limit is fixed later, that assertion flips and the count here changes.
 - Ctrl-C is not caught. An interrupted run ends with a Python traceback and the platform's
