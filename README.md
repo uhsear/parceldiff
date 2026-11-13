@@ -45,17 +45,23 @@ PASS  a key that jumped 9000 units is REUSED, not an owner edit, and the run exi
 PASS  keys spelled 0012 and 12 pair nothing, so the run exits 4, not 0  <-- pinned defect
 ...
 PASS  a diff with no coordinate and no area column exits 4, not a clean 0  <-- pinned defect
+...
 PASS  an area column that is blank on every row exits 4, not a clean 0  <-- pinned defect
+...
 PASS  one readable pair in fifty exits 4, not a clean 0  <-- pinned defect
+...
 PASS  nine pairs in ten exits 4 by default, not a clean 0  <-- pinned defect
 ...
 PASS  an unquoted comma that hides a USE change exits 2, not a false clean 0  <-- pinned defect
+PASS  a quote that is never closed is refused and says what to do  <-- pinned defect
+PASS  an unclosed quote that swallows rows exits 2, not a false clean 0  <-- pinned defect
 ...
 PASS  --ap is refused, not read as --apply, and writes nothing  <-- pinned defect
 ...
 PASS  one pair in ten left unmeasured exits 4, not a clean 0  <-- pinned defect
+...
 PASS  OLD and NEW as one file exit 64, not a clean 0  <-- pinned defect
-PASS  degrees with one -9999 row are refused, not reported as a clean 'moved 1.8 ft'  <-- pinned defect
+...
 PASS  a -9999 coordinate is unmeasured, so it exits 4, not 1 'different parcel'  <-- pinned defect
 PASS  a renamed only-attribute column exits 4, not a clean 0 over changed owners  <-- pinned defect
 PASS  a partly renamed layer exits 4 and names the columns, not a clean 0 over changed owners  <-- pinned defect
@@ -71,6 +77,7 @@ PASS  a reissued key on a truncated vintage exits 1 and writes no file  <-- pinn
 PASS  cp1252 owners that differ in one accented letter are refused, not read as equal  <-- pinned defect
 ...
 PASS  a key that starts with = is written to --out with a leading apostrophe, so a spreadsheet does not run it  <-- pinned defect
+...
 PASS  every leader (= + - @ tab and CR) gets an apostrophe in the key column  <-- pinned defect
 PASS  every leader (= + - @ tab and CR) gets an apostrophe in the detail column  <-- pinned defect
 ...
@@ -80,10 +87,10 @@ PASS  check() and raises() really do record a failure  <-- pinned defect
 PASS  the footer reports failures by count and by name, and exits 1  <-- pinned defect
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-262 assertions, 0 failed
+265 assertions, 0 failed
 ```
 
-The full run prints all 262 assertions. Each `...` line above is where this block is cut.
+The full run prints all 265 assertions. Each `...` line above is where this block is cut.
 
 ## What already exists
 
@@ -154,13 +161,13 @@ equivalent, and no more.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no
 database. Both vintages are CSVs, which is what every parcel layer can be exported as.
 
-The self-test prints the same 262 assertions on Windows (Python 3.13.2, 3.12.10 and 3.9.25) and on
+The self-test prints the same 265 assertions on Windows (Python 3.13.2, 3.12.10 and 3.9.25) and on
 Ubuntu (Python 3.12.3). The raw SHA-256 of the two outputs differs, because Windows writes CRLF line
 endings and Ubuntu writes LF. After CRLF is converted to LF, the Windows 3.13.2 output and the
-Ubuntu 3.12.3 output have the same SHA-256, `903e5602ee11391be04620c75539bdab3944d92fdf05a84c02b1c3a52aeded70`
-(the raw Windows value was `20439dfa21c1d2a18ec7ba52ddb72d6a478163ee2abd9ce29df3071673bb542c`).
+Ubuntu 3.12.3 output have the same SHA-256, `f5a07fa753b0023da9f39dde80f169ea5f8a601591fa3bc6fed7ff34efa239dd`
+(the raw Windows value was `3e9728751aa616aaf4f32769a5536995347340e5e0d99e739837d8b4a6e362d3`).
 `coverage run --branch parceldiff.py --self-test` reports 100 percent of statements and branches
-(1180 statements, 210 branches) on Windows and on Ubuntu. The Ubuntu system Python has no
+(1201 statements, 212 branches) on Windows and on Ubuntu. The Ubuntu system Python has no
 `coverage` package. I ran a copy of the pure-Python `coverage` 7.16.1 package from a scratch folder
 with `COVERAGE_CORE=pytrace PYTHONPATH=.`, so `import coverage` works there only from that folder.
 
@@ -500,9 +507,11 @@ REMOVED,P-5,6,,
 
 A cell that a spreadsheet would read as a formula is written with one apostrophe in front. The
 text columns `key` and `detail` carry text that came from the input files: a key can be `=1+1` or
-`-5`, and `detail` starts with a column name, which is a header cell of the input. When one of them
+`-5`, and `detail` starts with a fixed phrase such as `area changed by a factor of` or with a
+column name, which is a header cell of the input. When one of them
 starts with `=`, `+`, `-`, `@`, a tab or a carriage return, the file holds `'=1+1`, `'-5` or
-`'-OWNER: 'a' -> 'b'`. The `class` column is always one of the six class names, and `old_line` and
+`'-OWNER: 'a' -> 'b'`. A tab or carriage return in front of a key is stripped when the file is read, so on
+the command line those two reach the file only through a column name in `detail`. The `class` column is always one of the six class names, and `old_line` and
 `new_line` are plain integers or blank, so they are never changed and stay numbers. The cost is
 that a key such as `-5` is written as `'-5`. The apostrophe is part of the text, so a program
 that reads the CSV sees it, and I did not check how Excel displays it.
@@ -595,7 +604,9 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
   A lost X, Y or area value is not measured, so it can hide a key-reuse pair, and the exit code
   can stay 0. A row with text in cells beyond the header, which is what an
   unquoted comma in an address looks like, is refused with exit 2 and the line number. Extra
-  cells that are all blank, from a trailing comma, pass. A repeated column name is refused, because a CSV reader keeps the last column of that name and
+  cells that are all blank, from a trailing comma, pass. A quoted cell that is never closed, or text right after a closing quote, is refused with exit 2,
+  the file name and the line it was noticed on. Without that, the rest of the file would read as
+  one cell and the rows in it would show as `REMOVED` under a clean verdict. A repeated column name is refused, because a CSV reader keeps the last column of that name and
   drops the other without a word. Two or more empty column names count as one repeated name.
 - Keys and detail text print as they are. A quoted line break in a cell splits the report line in
   two, and a terminal escape sequence in a cell goes to the console unchanged. Only the `--out`
@@ -671,7 +682,7 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
 - A key that already starts with an apostrophe is written unchanged, so `'=1` and `=1` look the
   same in `--out`.
 - The self-test was run on Python 3.9.25, 3.12.10 and 3.13.2 on Windows and on 3.12.3 on Ubuntu.
-  Every run printed the same 262 assertions. Python 3.9 is the lowest version I tested.
+  Every run printed the same 265 assertions. Python 3.9 is the lowest version I tested.
 - Trailing empty rows such as `,,,` from a spreadsheet export count as rows with no key, so the
   run exits 3 until the rows are deleted or `--allow-blank-keys` is passed. That is the safe
   direction, and the message names the flag.
@@ -706,6 +717,10 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
 - Leading tab and carriage return in a key are stripped before the key is read, so the tab and CR
   guard on `key` is reached through `write_classified` only. Through the command line it is
   reached by a column name in `detail`.
+- A composite key joins its parts with a bar, so the keys `A|B` plus `C` and `A` plus `B|C` print
+  and write the same label, although the tool treats them as two keys.
+- A file name that starts with a dash is read as an option and the run exits 64. Pass it as
+  `./-old.csv`.
 - Ctrl-C ends the run with the platform's interrupt status. Treat any status outside 0, 1, 2, 3,
   4, 64 and 70 as a failed run.
 - A NUL byte inside a key or cell is not refused. It prints to the console and goes to `--out` unchanged.

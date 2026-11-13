@@ -678,7 +678,9 @@ def read_csv(path):
     what an unquoted comma looks like, and DictReader would park the cells
     under a None key where extract_rows drops them, so a change in them would
     read as UNCHANGED. Extra cells that are all blank, from a trailing comma,
-    are harmless and pass.
+    are harmless and pass. A quote that is never closed, or text after the
+    closing quote of a cell, is refused too (strict reader, csv.Error, exit
+    2): without it the rest of the file would collapse into one cell.
     """
     try:
         return _read_rows(path)
@@ -691,7 +693,7 @@ def read_csv(path):
 
 def _read_rows(path):
     with open(path, "r", newline="", encoding="utf-8-sig") as handle:
-        reader = csv.DictReader(handle)
+        reader = csv.DictReader(handle, strict=True)
         header = list(reader.fieldnames or [])
         repeated = sorted(set(n for n in header if header.count(n) > 1))
         if repeated:
@@ -700,19 +702,29 @@ def _read_rows(path):
                              % (path, ", ".join(n or "(blank name)"
                                                 for n in repeated)))
         rows = []
-        for raw in reader:
-            record = _Record(raw)
-            record.line = reader.line_num - sum(
-                _breaks(v) for v in raw.values())
-            extra = [c for c in raw.get(None, ()) if c.strip()]
-            if extra:
-                raise csv.Error(
-                    "%s line %d has %d more cell(s) than the header, with "
-                    "text in them. An unquoted comma shifted the cells, and "
-                    "a changed value may sit in the extra ones. Quote the "
-                    "field that holds the comma, or fix the export."
-                    % (path, record.line, len(raw[None])))
-            rows.append(record)
+        try:
+            for raw in reader:
+                record = _Record(raw)
+                record.line = reader.line_num - sum(
+                    _breaks(v) for v in raw.values())
+                extra = [c for c in raw.get(None, ()) if c.strip()]
+                if extra:
+                    raise csv.Error(
+                        "%s line %d has %d more cell(s) than the header, "
+                        "with text in them. An unquoted comma shifted the "
+                        "cells, and a changed value may sit in the extra "
+                        "ones. Quote the field that holds the comma, or fix "
+                        "the export." % (path, record.line, len(raw[None])))
+                rows.append(record)
+        except csv.Error as exc:
+            if str(exc).startswith(path):
+                raise
+            raise csv.Error(
+                "%s near line %d: %s. A quote is probably not closed or not "
+                "doubled inside a quoted cell, or the export was cut off. "
+                "Reading on would swallow the next rows into one cell and "
+                "report them as removed. Fix the export."
+                % (path, reader.line_num, exc))
         return rows, header
 
 
@@ -1486,6 +1498,30 @@ def _self_test(tmp):
           and "VERDICT" not in out,
           "an unquoted comma that hides a USE change exits 2, not a false "
           "clean 0  <-- pinned defect")
+    message = ""
+    try:
+        read_csv(put("unclosed.csv", "K,V\n1,a\n2,\"b unbalanced\n3,c\n"))
+    except csv.Error as exc:
+        message = str(exc)
+    check("unclosed.csv near line" in message and "not closed" in message,
+          "a quote that is never closed is refused and says what to do  "
+          "<-- pinned defect")
+    old_path = put("q_old.csv", "P,OWNER,USE\nP-1,Ames,RES\nP-2,Bay,RES\n"
+                   "P-3,Cox,RES\n")
+    new_path = put("q_new.csv", "P,OWNER,USE\nP-1,\"Ames,RES\nP-2,Bay,RES\n"
+                   "P-3,Cox,RES\n")
+    code, out, err = run_cli([old_path, new_path, "--key-field", "P",
+                              "--skip-reuse-check"])
+    check(code == 2 and "not closed" in err and "VERDICT" not in out,
+          "an unclosed quote that swallows rows exits 2, not a false clean "
+          "0  <-- pinned defect")
+    message = ""
+    try:
+        read_csv(put("stray.csv", "K,V\n1,\"a\"b\n"))
+    except csv.Error as exc:
+        message = str(exc)
+    check("stray.csv near line" in message,
+          "text after the closing quote of a cell is refused")
     raises(lambda: read_csv(put("dup.csv", "K,V,V\n1,a,b\n")),
            "a repeated column name is refused, the CSV reader would keep "
            "the last and drop the first  <-- pinned defect")
