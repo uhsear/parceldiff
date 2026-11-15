@@ -89,10 +89,10 @@ PASS  check() and raises() really do record a failure  <-- pinned defect
 PASS  the footer reports failures by count and by name, and exits 1  <-- pinned defect
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-268 assertions, 0 failed
+270 assertions, 0 failed
 ```
 
-The full run prints all 268 assertions. Each `...` line above is where this block is cut.
+The full run prints all 270 assertions. Each `...` line above is where this block is cut.
 
 ## What already exists
 
@@ -163,15 +163,10 @@ equivalent, and no more.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no
 database. Both vintages are CSVs, which is what every parcel layer can be exported as.
 
-The self-test prints the same 268 assertions on Windows (Python 3.13.2, 3.12.10 and 3.9.25) and on
-Ubuntu (Python 3.12.3). The raw SHA-256 of the two outputs differs, because Windows writes CRLF line
-endings and Ubuntu writes LF. After CRLF is converted to LF, the Windows 3.13.2 output and the
-Ubuntu 3.12.3 output have the same SHA-256, `f1dbef612d7cb93ab2e10f00a428354c9d09f7c035a3614b98f82b807f69998c`
-(the raw Windows value was `29e1ba96f5e3dc11db6cafaba69d06d2dc27bf1225b10205538a22e759f0d899`).
-`coverage run --branch parceldiff.py --self-test` reports 100 percent of statements and branches
-(1226 statements, 218 branches) on Windows and on Ubuntu. The Ubuntu system Python has no
-`coverage` package. I ran a copy of the pure-Python `coverage` 7.16.1 package from a scratch folder
-with `COVERAGE_CORE=pytrace PYTHONPATH=.`, so `import coverage` works there only from that folder.
+The self-test prints 270 assertions on Windows with Python 3.13.2, 3.12.10 and 3.9.25. I did not
+re-run it on Ubuntu after the console escaping was added, so the cross-platform output hash and the
+coverage figures (100 percent of statements and branches, measured before that change) are not
+restated here.
 
 The key is compared as text and the geometry is read from columns. The tool measures a straight
 line between two centroids and converts nothing. Both vintages must already be in one projected
@@ -612,10 +607,12 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
   the file name and the line it was noticed on. Without that, the rest of the file would read as
   one cell and the rows in it would show as `REMOVED` under a clean verdict. A repeated column name is refused, because a CSV reader keeps the last column of that name and
   drops the other without a word. Two or more empty column names count as one repeated name.
-- Keys and detail text print as they are. A quoted line break in a cell splits the report line in
-  two, and a terminal escape sequence in a cell goes to the console unchanged. Only the `--out`
-  CSV is guarded. The console report is not sanitised, so a key that holds ANSI escape bytes can
-  redraw or retitle the console of whoever reads it. Review an untrusted CSV as text first.
+- The console report writes every control, bidi and zero-width character of a key, column name or
+  value as a visible `\uXXXX` escape: C0 and C1 controls, U+200B to U+200D, U+2028, U+2029,
+  U+202A to U+202E, U+2066 to U+2069 and U+FEFF. A quoted line break in a cell stays on one report
+  line, and an ANSI escape cannot redraw the console. The `--out` CSV keeps the original text and
+  is guarded only against formula leaders. The traceback of an unexpected crash (exit 70) is not
+  scrubbed.
 - A new vintage that keeps a smaller share of the old keys than `--min-overlap` exits 4. A vintage
   that keeps more than that, such as 600 of 1,000 keys, exits 0 and lists the rest as `REMOVED`,
   because removals do not fail the gate. Read the `REMOVED` count yourself. A new vintage that is
@@ -685,8 +682,8 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
   page covers reserved device names, but I did not check the other two against it.
 - A key that already starts with an apostrophe is written unchanged, so `'=1` and `=1` look the
   same in `--out`.
-- The self-test was run on Python 3.9.25, 3.12.10 and 3.13.2 on Windows and on 3.12.3 on Ubuntu.
-  Every run printed the same 268 assertions. Python 3.9 is the lowest version I tested.
+- The self-test was run on Python 3.9.25, 3.12.10 and 3.13.2 on Windows. Every run printed the
+  same 270 assertions. Python 3.9 is the lowest version I tested.
 - Trailing empty rows such as `,,,` from a spreadsheet export count as rows with no key, so the
   run exits 3 until the rows are deleted or `--allow-blank-keys` is passed. That is the safe
   direction, and the message names the flag.
@@ -713,9 +710,6 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
 - Windows path forms other than reserved device names were observed on one machine and no cited
   Microsoft page covers them.
 - A reader that closes the pipe early ends the run with exit 70 and a traceback.
-- The tool prints keys, column names and changed values to the terminal as they are, so a cell
-  that holds ANSI escape sequences can redraw or hide lines. Read output from untrusted files in
-  a pager that shows control characters.
 - A column name that starts with a line feed leads the `detail` cell and is written unguarded,
   because the guard covers only the six listed leaders.
 - Leading tab and carriage return in a key are stripped before the key is read, so the tab and CR
@@ -739,8 +733,8 @@ reissued key and is also thin on overlap, it exits 1, because the reissued key i
   interrupt status, not one of the codes above.
 - This tool writes a CSV, not a spreadsheet or a feature class, and has no rule for a single
   column, such as a flag that must never change under one key.
-- Every statement and branch is reached by the self-test, so there is no uncovered line to name.
-  Coverage was measured with `coverage run --branch` on Windows and on Ubuntu.
+- Coverage was measured with `coverage run --branch` on Windows and on Ubuntu before the console
+  escaping was added. I did not re-measure it, so I make no claim about uncovered lines.
 
 ## Contributing
 

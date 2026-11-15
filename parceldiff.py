@@ -218,6 +218,24 @@ def key_label(key):
     return "|".join(key)
 
 
+_UNSAFE = re.compile(u"[\x00-\x1f\x7f-\x9f\u200b-\u200d\u2028\u2029"
+                     u"\u202a-\u202e\u2066-\u2069\ufeff]")
+
+
+def scrub(text):
+    """Text for the console, with every control, bidi and zero-width character
+    written as a visible escape. A value from the input can then not move the
+    cursor, redraw a line, reorder text or start a new report line."""
+    return _UNSAFE.sub(lambda m: "\\u%04x" % ord(m.group()), text)
+
+
+def _say(text="", file=None):
+    """print() for text that holds input values. Leading line feeds are the
+    tool's own spacing and stay."""
+    body = text.lstrip("\n")
+    print("\n" * (len(text) - len(body)) + scrub(body), file=file)
+
+
 PLAIN_NUMBER = re.compile(r"[+-]?(?:([0-9]+)(?:[.][0-9]*)?|[.][0-9]+)")
 
 
@@ -1983,8 +2001,10 @@ def _self_test(tmp):
     nl_old = put("nl_old.csv", "PARCEL,OWNER\nP-1,a\n")
     nl_new = put("nl_new.csv", "PARCEL,OWNER\nP-1,\"b\nc\x1b[31m\"\n")
     code, out, _ = run_cli([nl_old, nl_new, "--skip-reuse-check"])
-    check("c\x1b[31m' (old line 2, new line 2)" in out.splitlines(),
-          "a line break and a terminal escape in a cell print as they are")
+    check("'b\\u000ac\\u001b[31m' (old line 2, new line 2)" in out
+          and "\x1b" not in out and len(out.splitlines()) == 10,
+          "a line break and a terminal escape in a cell print as visible "
+          "escapes, on one report line")
     eq_path = put("eq.csv", "PARCEL,OWNER\n=1+1,A\n")
     eq_out = os.path.join(tmp, "eq_out.csv")
     run_cli([eq_path, twin(eq_path), "--skip-reuse-check", "--out", eq_out,
@@ -2025,6 +2045,21 @@ def _self_test(tmp):
     check(cell("Hydrants") == "Hydrants" and cell("") == ""
           and cell("a=b") == "a=b" and cell("'=x") == "'=x",
           "a cell that does not start with a leader is written as it came")
+    hostile = u"ok\x1b[2K\rFAKE‮​﻿⁦ \x7f"
+    hos_old = put("hos_old.csv", u'PARCEL,OWNER\nA,x\n"R%s",x\n' % hostile)
+    hos_new = put("hos_new.csv", u'PARCEL,OWNER\nA,"y%s"\n"N%s",x\n'
+                  % (hostile, hostile))
+    code, shown, _ = run_cli([hos_old, hos_new, "--compare-fields", "OWNER"])
+    check(not re.search(u"[\x00-\x09\x0b-\x1f\x7f-\x9f​-‍ "
+                        u" ‪-‮⁦-⁩﻿]", shown)
+          and u"Nok\\u001b[2K\\u000dFAKE\\u202e\\u200b\\ufeff\\u2066"
+              u"\\u2029\\u007f (new line 4)" in shown
+          and shown.count("\n") == 18,
+          "a hostile value from the input prints as visible escapes and "
+          "forges no report line  <-- pinned defect")
+    check(scrub(u"plain 'text' | A-1, 中é") == u"plain 'text' | A-1, "
+          u"中é" and scrub(u"") == u"",
+          "an ordinary value, accents and CJK included, prints unchanged")
     neg_old = put("neg_old.csv", "PARCEL,OWNER\n-5,a\n+7,a\n")
     neg_out = os.path.join(tmp, "neg_out.csv")
     run_cli([neg_old, twin(neg_old), "--skip-reuse-check", "--out", neg_out,
@@ -2339,7 +2374,7 @@ def main(argv=None):
     try:
         return _run(argv)
     except Exception as exc:
-        print("error: unexpected %s: %s. This is a fault in the tool, not a "
+        _say("error: unexpected %s: %s. This is a fault in the tool, not a "
               "finding about the data." % (type(exc).__name__, exc),
               file=sys.stderr)
         traceback.print_exc()
@@ -2358,33 +2393,33 @@ def _run(argv):
         return self_test()
 
     if not args.old or not args.new:
-        print("error: two CSV vintages are required. Use --self-test to "
+        _say("error: two CSV vintages are required. Use --self-test to "
               "verify the tool without them.", file=sys.stderr)
         return 64
     key_fields = _names(args.key_field)
     if not key_fields:
-        print("error: --key-field names no column.", file=sys.stderr)
+        _say("error: --key-field names no column.", file=sys.stderr)
         return 64
     if bool(args.x_field) != bool(args.y_field):
-        print("error: --x-field and --y-field go together.", file=sys.stderr)
+        _say("error: --x-field and --y-field go together.", file=sys.stderr)
         return 64
     if args.sample < 0:
-        print("error: --sample cannot be negative.", file=sys.stderr)
+        _say("error: --sample cannot be negative.", file=sys.stderr)
         return 64
     if args.compare_fields is not None and not _names(args.compare_fields):
-        print("error: --compare-fields names no column.", file=sys.stderr)
+        _say("error: --compare-fields names no column.", file=sys.stderr)
         return 64
     if args.skip_reuse and (args.x_field or args.area_field):
-        print("error: --skip-reuse-check contradicts --x-field, --y-field "
+        _say("error: --skip-reuse-check contradicts --x-field, --y-field "
               "and --area-field, which turn the check on.", file=sys.stderr)
         return 64
     if args.apply and not args.out:
-        print("error: --apply needs --out.", file=sys.stderr)
+        _say("error: --apply needs --out.", file=sys.stderr)
         return 64
     if _same_file(args.old, args.new):
         # A job whose two path variables collapse to one file would read a
         # clean diff every night. Exit 64: this is a usage fault, not a diff.
-        print("error: OLD and NEW are the same file, %s. Comparing a file "
+        _say("error: OLD and NEW are the same file, %s. Comparing a file "
               "with itself finds nothing. Check the two paths."
               % args.old, file=sys.stderr)
         return 64
@@ -2393,7 +2428,7 @@ def _run(argv):
         # should say so before --apply is added, not after.
         for vintage in (args.old, args.new):
             if _same_file(args.out, vintage):
-                print("error: --out %s is also an input vintage. Name a new "
+                _say("error: --out %s is also an input vintage. Name a new "
                       "file." % args.out, file=sys.stderr)
                 return 64
 
@@ -2406,12 +2441,12 @@ def _run(argv):
     except ValueError as exc:
         # A column name the operator got wrong is a usage error, and a file
         # that could not be read is not. Only the exit code tells them apart.
-        print("error: %s" % exc, file=sys.stderr)
+        _say("error: %s" % exc, file=sys.stderr)
         return 64
     except (IOError, OSError, csv.Error) as exc:
         # csv.Error too. A field over csv's size limit, or a NUL in the
         # file, is an unreadable input, not a diff that failed.
-        print("error: %s" % exc, file=sys.stderr)
+        _say("error: %s" % exc, file=sys.stderr)
         return 2
 
     old = extract_rows(old_raw, key_fields, args.x_field, args.y_field,
@@ -2419,7 +2454,7 @@ def _run(argv):
     new = extract_rows(new_raw, key_fields, args.x_field, args.y_field,
                        args.area_field)
     if args.x_field and not args.projected and looks_like_degrees(old + new):
-        print("error: every coordinate fits longitude -180..180 and latitude "
+        _say("error: every coordinate fits longitude -180..180 and latitude "
               "-90..90, so these look like degrees. Distances in degrees mean "
               "nothing against a threshold in feet. Project both vintages, or "
               "pass --projected if this is a local grid.", file=sys.stderr)
@@ -2432,26 +2467,26 @@ def _run(argv):
             bool(args.area_field), args.allow_blank, args.units,
             args.min_measured, args.skip_reuse)
     except ValueError as exc:
-        print("error: %s" % exc, file=sys.stderr)
+        _say("error: %s" % exc, file=sys.stderr)
         return 64
     note_columns(report, only)
 
     # After compare, so a usage error leaves stdout empty rather than looking
     # like the start of a run that went well.
-    print("parceldiff: %s %d row(s), %s %d row(s), key %s"
+    _say("parceldiff: %s %d row(s), %s %d row(s), key %s"
           % (args.old, len(old), args.new, len(new), "|".join(key_fields)))
     for line in describe(report, args.sample):
-        print(line)
+        _say(line)
 
     if args.out:
         if not args.apply:
-            print("\nCheck only. %s was not written. Re-run with --apply."
+            _say("\nCheck only. %s was not written. Re-run with --apply."
                   % args.out)
         elif report.refused:
-            print("\nRefused. %s was not written, because nothing was "
+            _say("\nRefused. %s was not written, because nothing was "
                   "classified." % args.out)
         elif unverified_reasons(report):
-            print("\nUnverified. %s was not written, because a file of "
+            _say("\nUnverified. %s was not written, because a file of "
                   "classes would look like a diff that can be trusted."
                   % args.out)
         else:
@@ -2461,10 +2496,10 @@ def _run(argv):
             try:
                 write_classified(args.out, report)
             except (IOError, OSError, csv.Error) as exc:
-                print("error: could not write %s: %s" % (args.out, exc),
+                _say("error: could not write %s: %s" % (args.out, exc),
                       file=sys.stderr)
                 return 2
-            print("\nwrote %s" % args.out)
+            _say("\nwrote %s" % args.out)
 
     return gate(report)
 
